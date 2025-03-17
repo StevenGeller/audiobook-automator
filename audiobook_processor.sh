@@ -65,52 +65,10 @@ sanitize_filename() {
     echo "$sanitized"
 }
 
-# Function to display progress bar
-show_progress() {
-    local total_duration=$1
-    local pid=$2
-    local progress_file="$3"
-    local book_name="$4"
-    
-    # Initialize progress file
-    echo "0" > "$progress_file"
-    
-    # Calculate width based on terminal size
-    local width=$(tput cols)
-    local bar_size=$((width - 30))
-    
-    # Ensure we have a valid duration to avoid division by zero
-    if [ "$total_duration" -le 0 ]; then
-        total_duration=1  # Set a minimum duration to avoid division by zero
-    fi
-    
-    # Display the progress bar and update it
-    while kill -0 $pid 2>/dev/null; do
-        if [ -f "$progress_file" ]; then
-            local current_time=$(cat "$progress_file" 2>/dev/null || echo "0")
-            if [[ "$current_time" =~ ^[0-9]+$ ]]; then
-                # Prevent division by zero
-                if [ "$total_duration" -gt 0 ]; then
-                    local percentage=$((current_time * 100 / total_duration))
-                else
-                    local percentage=0
-                fi
-                [ $percentage -gt 100 ] && percentage=100
-                
-                # Calculate bar width
-                local completed=$((percentage * bar_size / 100))
-                local remaining=$((bar_size - completed))
-                
-                # Build the progress bar
-                local bar=$(printf "%${completed}s" | tr " " "=")$(printf "%${remaining}s" | tr " " " ")
-                
-                # Clear line and print progress
-                printf "\r\033[K[%s] %3d%% %s" "$bar" "$percentage" "$book_name"
-            fi
-        fi
-        sleep 1
-    done
-    printf "\r\033[K"  # Clear the line when done
+# Function to format time in HH:MM:SS format
+format_time() {
+    local seconds=$1
+    printf "%02d:%02d:%02d" $((seconds/3600)) $((seconds%3600/60)) $((seconds%60))
 }
 
 # Function to extract metadata from filename patterns
@@ -1103,40 +1061,77 @@ EOF
     # Try different approaches until one succeeds
     local try_approach=1
     
-    # Run ffmpeg in background to allow progress monitoring
+    # Show that we're working
+    echo "Converting audio files to m4b format (this may take a while)..."
+    
+    # Start a background progress indicator while we run ffmpeg
     (
-        # First approach: Most compatible concat with protocol whitelist
-        if [ $try_approach -eq 1 ]; then
-            echo "Using standard concat approach..." >> "$LOG_FILE"
-            ffmpeg -y -nostdin -f concat -safe 0 -protocol_whitelist "file,pipe" -i "$file_list" -i "$chapters_file" \
-                $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-i $cover_art") \
-                -map_metadata 1 \
-                $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-map 0:a -map 2:v -disposition:v:0 attached_pic" || echo "-map 0:a") \
-                -c:a aac -b:a 64k -movflags +faststart \
-                -metadata title="$title" \
-                -metadata artist="$author" \
-                -metadata album="$title" \
-                -metadata genre="$genre" \
-                $([[ -n "$narrator" ]] && echo "-metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\"") \
-                $([[ -n "$series" ]] && echo "-metadata show=\"$series\"") \
-                $([[ -n "$series" && -n "$series_part" ]] && echo "-metadata episode_id=\"$series_part\"") \
-                $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
-                $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
-                -progress - "$temp_output_file" 2>"$stderr_file" | \
-            grep --line-buffered -o "out_time_ms=[0-9]*" | grep --line-buffered -o "[0-9]*" | \
-            awk '{printf "%d\n", $1/1000000}' > "$progress_file"
-        fi
+        # Simple progress indicator
+        local chars="-\|/"
+        local i=0
+        local timeElapsed=0
+        
+        # While ffmpeg is running, show a spinner
+        while true; do
+            # Show a dynamic message with elapsed time
+            printf "\r\033[KWorking [%c] %02dm:%02ds elapsed... " "${chars:$i:1}" $((timeElapsed/60)) $((timeElapsed%60))
+            i=$(( (i+1) % 4 ))
+            sleep 1
+            timeElapsed=$((timeElapsed+1))
+            
+            # Check if the temp output file exists and is growing
+            if [ -f "$temp_output_file" ]; then
+                local filesize=$(stat -f%z "$temp_output_file" 2>/dev/null || echo "0")
+                printf "(%s MB)" $(echo "scale=1; $filesize/1048576" | bc 2>/dev/null || echo "0")
+            fi
+            
+            # Check if the marker file exists signaling that ffmpeg is done
+            if [ -f "${progress_file}.done" ]; then
+                break
+            fi
+        done
     ) &
     
-    # Capture the FFmpeg process ID
-    local ffmpeg_pid=$!
+    # Save progress indicator PID
+    local progress_pid=$!
     
-    # Show progress bar
-    show_progress "$total_duration" "$ffmpeg_pid" "$progress_file" "$book_name"
+    # Cleanup function to ensure we always kill the progress indicator
+    cleanup_progress() {
+        kill $progress_pid 2>/dev/null || true
+        # Clear the line
+        printf "\r\033[K"
+    }
     
-    # Wait for FFmpeg to finish
-    wait $ffmpeg_pid
+    # Run ffmpeg directly with simpler progress handling
+    set +e  # Disable exit on error temporarily
+    
+    # Mark the starting time
+    date +%s > "${progress_file}.start"
+    
+    # Run ffmpeg - we'll simplify the approach for better reliability
+    ffmpeg -y -nostdin -f concat -safe 0 -protocol_whitelist "file,pipe" -i "$file_list" -i "$chapters_file" \
+        $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-i $cover_art") \
+        -map_metadata 1 \
+        $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-map 0:a -map 2:v -disposition:v:0 attached_pic" || echo "-map 0:a") \
+        -c:a aac -b:a 64k -movflags +faststart \
+        -metadata title="$title" \
+        -metadata artist="$author" \
+        -metadata album="$title" \
+        -metadata genre="$genre" \
+        $([[ -n "$narrator" ]] && echo "-metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\"") \
+        $([[ -n "$series" ]] && echo "-metadata show=\"$series\"") \
+        $([[ -n "$series" && -n "$series_part" ]] && echo "-metadata episode_id=\"$series_part\"") \
+        $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
+        $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
+        "$temp_output_file" 2>"$stderr_file"
+    
+    # Save the result and mark completion
     local ffmpeg_result=$?
+    touch "${progress_file}.done"
+    
+    # Kill the progress indicator and clean up
+    cleanup_progress
+    
     set -e  # Re-enable exit on error
     
     # Check for common error patterns in stderr
