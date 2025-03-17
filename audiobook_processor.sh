@@ -1,31 +1,24 @@
 #!/bin/bash
+# Audiobook Processor - Converts audio files to m4b format with proper metadata
 
-# Audiobook Batch Processor for macOS
-# This script processes a folder of audiobooks:
-# - Sets proper metadata
-# - Detects chapters
-# - Converts to m4b format
-# - Optionally removes original files after successful conversion
-
-# Prerequisites:
-# brew install ffmpeg mp4v2 fd jq mediainfo python3
-# pip3 install requests beautifulsoup4 fuzzywuzzy
-
-# Usage: ./audiobook_processor.sh /path/to/audiobooks/folder [--keep-original-files]
-# If the --keep-original-files flag is provided, the original audio files will not be deleted after processing
-
-set -e
+# Default behavior: remove original files after successful conversion
+KEEP_ORIGINAL_FILES=false
 
 # Parse arguments
-KEEP_ORIGINAL_FILES=false
-AUDIOBOOKS_DIR=""
-
-for arg in "$@"; do
-    if [[ "$arg" == "--keep-original-files" ]]; then
-        KEEP_ORIGINAL_FILES=true
-    elif [[ -z "$AUDIOBOOKS_DIR" ]]; then
-        AUDIOBOOKS_DIR="$arg"
-    fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --keep-original-files)
+            KEEP_ORIGINAL_FILES=true
+            shift
+            ;;
+        *)
+            # First non-flag argument is the audiobooks directory
+            if [ -z "$AUDIOBOOKS_DIR" ]; then
+                AUDIOBOOKS_DIR="$1"
+            fi
+            shift
+            ;;
+    esac
 done
 
 # Check if directory was provided
@@ -79,107 +72,49 @@ sanitize_filename() {
     # Remove leading and trailing spaces
     sanitized=$(echo "$sanitized" | sed -e 's/^ *//' -e 's/ *$//')
     
-    # Condense multiple spaces into a single space
-    sanitized=$(echo "$sanitized" | sed -e 's/  */ /g')
-    
-    # Ensure we have a valid filename by adding a default if empty
-    if [ -z "$sanitized" ]; then
-        sanitized="audiobook"
-    fi
-    
+    # Return the sanitized filename
     echo "$sanitized"
 }
 
-# Function to format time in HH:MM:SS format
+# Function to format time in HH:MM:SS
 format_time() {
-    local seconds=$1
-    printf "%02d:%02d:%02d" $((seconds/3600)) $((seconds%3600/60)) $((seconds%60))
+    local total_seconds=$1
+    printf "%02d:%02d:%02d" $((total_seconds/3600)) $((total_seconds%3600/60)) $((total_seconds%60))
 }
 
-# Function to extract metadata from filename patterns
+# Function to extract author and title from filename or directory name
 extract_filename_metadata() {
-    local filename="$1"
-    local metadata=()
+    local input="$1"
+    local basename=$(basename "$input")
     
-    # Remove file extension
-    filename=$(basename "$filename")
-    filename="${filename%.*}"
+    # Remove file extension if present
+    local nameonly="${basename%.*}"
     
-    # Common patterns to check:
-    
-    # Pattern 1: Author - Title (Year)
-    if [[ "$filename" =~ (.+)\ -\ (.+)\ \(([0-9]{4})\) ]]; then
-        metadata[0]="${BASH_REMATCH[1]}" # Author
-        metadata[1]="${BASH_REMATCH[2]}" # Title
-        metadata[2]="${BASH_REMATCH[3]}" # Year
-        return 0
+    # Check if the name follows the pattern "Author - Title" or similar
+    if [[ "$nameonly" == *" - "* ]]; then
+        local author=$(echo "$nameonly" | sed -E 's/^(.*) - .*$/\1/g' | xargs)
+        local title=$(echo "$nameonly" | sed -E 's/^.* - (.*)$/\1/g' | xargs)
+        echo "author=$author"
+        echo "title=$title"
+    # Check if name follows pattern "Title by Author"
+    elif [[ "$nameonly" == *" by "* ]]; then
+        local title=$(echo "$nameonly" | sed -E 's/^(.*) by .*$/\1/g' | xargs)
+        local author=$(echo "$nameonly" | sed -E 's/^.* by (.*)$/\1/g' | xargs)
+        echo "author=$author"
+        echo "title=$title"
+    # Check if name follows "Title (Author)" pattern
+    elif [[ "$nameonly" =~ (.*)\((.*)\) ]]; then
+        local title=$(echo "$nameonly" | sed -E 's/^(.*)\(.*\)$/\1/g' | xargs)
+        local author=$(echo "$nameonly" | sed -E 's/^.*\((.*)\)$/\1/g' | xargs)
+        echo "author=$author"
+        echo "title=$title"
+    else
+        # Just use as title
+        echo "title=$nameonly"
     fi
-    
-    # Pattern 2: Author - Series Name #X - Title
-    if [[ "$filename" =~ (.+)\ -\ (.+)\ #([0-9]+(\.[0-9]+)?)\ -\ (.+) ]]; then
-        metadata[0]="${BASH_REMATCH[1]}" # Author
-        metadata[1]="${BASH_REMATCH[5]}" # Title
-        metadata[3]="${BASH_REMATCH[2]}" # Series
-        metadata[4]="${BASH_REMATCH[3]}" # Series part
-        return 0
-    fi
-    
-    # Pattern 3: Author - Series Name Book X - Title
-    if [[ "$filename" =~ (.+)\ -\ (.+)\ Book\ ([0-9]+(\.[0-9]+)?)\ -\ (.+) ]]; then
-        metadata[0]="${BASH_REMATCH[1]}" # Author
-        metadata[1]="${BASH_REMATCH[5]}" # Title
-        metadata[3]="${BASH_REMATCH[2]}" # Series
-        metadata[4]="${BASH_REMATCH[3]}" # Series part
-        return 0
-    fi
-    
-    # Pattern 4: Title - Author - Narrator
-    if [[ "$filename" =~ (.+)\ -\ (.+)\ -\ (.+) ]]; then
-        metadata[0]="${BASH_REMATCH[2]}" # Author
-        metadata[1]="${BASH_REMATCH[1]}" # Title
-        metadata[5]="${BASH_REMATCH[3]}" # Narrator
-        return 0
-    fi
-    
-    # Pattern 5: Title (Year) - Author
-    if [[ "$filename" =~ (.+)\ \(([0-9]{4})\)\ -\ (.+) ]]; then
-        metadata[0]="${BASH_REMATCH[3]}" # Author
-        metadata[1]="${BASH_REMATCH[1]}" # Title
-        metadata[2]="${BASH_REMATCH[2]}" # Year
-        return 0
-    fi
-    
-    # Pattern 6: Author - Series Name - Book X - Title
-    if [[ "$filename" =~ (.+)\ -\ (.+)\ -\ Book\ ([0-9]+(\.[0-9]+)?)\ -\ (.+) ]]; then
-        metadata[0]="${BASH_REMATCH[1]}" # Author
-        metadata[1]="${BASH_REMATCH[5]}" # Title
-        metadata[3]="${BASH_REMATCH[2]}" # Series
-        metadata[4]="${BASH_REMATCH[3]}" # Series part
-        return 0
-    fi
-    
-    # Pattern 7: Title - The Series Name X - Author
-    if [[ "$filename" =~ (.+)\ -\ The\ (.+)\ ([0-9]+(\.[0-9]+)?)\ -\ (.+) ]]; then
-        metadata[0]="${BASH_REMATCH[5]}" # Author
-        metadata[1]="${BASH_REMATCH[1]}" # Title
-        metadata[3]="The ${BASH_REMATCH[2]}" # Series
-        metadata[4]="${BASH_REMATCH[3]}" # Series part
-        return 0
-    fi
-    
-    # Pattern 8: "NN - Title - Author - Year" (for collections like "Top 100 Science Fiction")
-    if [[ "$filename" =~ ^([0-9]+)\ -\ (.+)\ -\ (.+)\ -\ ([0-9]{4})$ ]]; then
-        metadata[0]="${BASH_REMATCH[3]}" # Author
-        metadata[1]="${BASH_REMATCH[2]}" # Title
-        metadata[2]="${BASH_REMATCH[4]}" # Year
-        return 0
-    fi
-    
-    # If no pattern matches, return 1 (false)
-    return 1
 }
 
-# Function to process a single audiobook folder
+# Main function to process an audiobook directory
 process_audiobook() {
     local book_dir="$1"
     local book_name=$(basename "$book_dir")
@@ -187,476 +122,156 @@ process_audiobook() {
     # Show book number out of total in array
     local book_count=${#processed_books[@]}
     echo "Processing audiobook $book_count: $book_name"
-    echo "Processing audiobook $book_count: $book_name" >> "$LOG_FILE"
     
-    # For network shares, use a local temp directory in the user's home directory to avoid permission issues
-    # Create a unique hash of the book directory path to use as an identifier
-    # Use md5 on macOS and md5sum on Linux
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        local dir_hash=$(echo "$book_dir" | md5)
-    else
-        local dir_hash=$(echo "$book_dir" | md5sum | cut -d' ' -f1)
-    fi
-    local temp_base="$HOME/.audiobook_processor_temp"
-    local temp_dir="${temp_base}/${dir_hash}"
-    
-    # Ensure the base temp directory exists
-    mkdir -p "$temp_base"
-    
-    # Check if temp directory already exists (from a previous failed run)
-    if [ -d "$temp_dir" ]; then
-        echo "Found existing temp directory, cleaning up first..." >> "$LOG_FILE"
-        rm -rf "$temp_dir" 2>/dev/null
-        
-        # If failed to remove, try forceful removal
-        if [ -d "$temp_dir" ]; then
-            find "$temp_dir" -type f -exec rm -f {} \; 2>/dev/null
-            find "$temp_dir" -depth -type d -exec rmdir {} \; 2>/dev/null
-            rm -rf "$temp_dir" 2>/dev/null
-        fi
-        
-        # If still exists after cleanup attempts, use a unique temp dir
-        if [ -d "$temp_dir" ]; then
-            echo "Warning: Could not clean up temp directory, creating unique one instead..." >> "$LOG_FILE"
-            temp_dir="${temp_dir}_$(date +%s)"
-        fi
-    fi
-    
-    # Create the temp directory
-    mkdir -p "$temp_dir"
-    
-    # Make sure we have write permissions
-    chmod -R 700 "$temp_dir" 2>/dev/null
-    
-    # Step 1: Gather audiobook files (mp3, m4a, flac, etc.) and check for m4b files
-    echo "Gathering audio files..." >> "$LOG_FILE"
-    
-    # Use a temp file to store the file list to avoid issues with newlines and spaces
-    local files_temp="$temp_dir/audio_files_list.txt"
-    fd -e mp3 -e m4a -e flac -e wav -e aac . "$book_dir" --exclude "$temp_dir" | sort > "$files_temp"
-    local audio_files=$(cat "$files_temp")
-    
-    # Check for existing m4b files
-    local m4b_files=""
-    local has_m4b_files=false
-    if m4b_files=$(find "$book_dir" -maxdepth 1 -name "*.m4b" 2>/dev/null); then
-        if [ -n "$m4b_files" ]; then
-            has_m4b_files=true
-            echo "Found existing m4b files in the directory" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    # Debug audio files found
-    echo "Debug - Audio files found: $(wc -l < "$files_temp") files" | tee -a "$LOG_FILE"
-    if [ "$has_m4b_files" = true ]; then
-        echo "Debug - M4B files found: $(echo "$m4b_files" | wc -l) files" | tee -a "$LOG_FILE"
-    fi
-    
-    # If we have neither audio files nor m4b files, exit
-    if [ -z "$audio_files" ] && [ "$has_m4b_files" = false ]; then
-        echo "No audio or m4b files found in $book_dir" | tee -a "$LOG_FILE"
-        rm -rf "$temp_dir"
+    # Create a unique temp directory for processing
+    local timestamp=$(date +%s)
+    local temp_dir="$book_dir/temp_processing_$timestamp"
+    mkdir -p "$temp_dir" || {
+        echo "Error: Failed to create temp directory: $temp_dir" | tee -a "$LOG_FILE"
+        echo "Skipping this audiobook" | tee -a "$LOG_FILE"
         return
+    }
+    
+    # Create processed subdirectory if it doesn't exist
+    local processed_dir="$AUDIOBOOKS_DIR/processed"
+    if [ ! -d "$processed_dir" ]; then
+        mkdir -p "$processed_dir" || {
+            echo "Error: Failed to create processed directory: $processed_dir" | tee -a "$LOG_FILE"
+            echo "Will use original location instead" | tee -a "$LOG_FILE"
+            processed_dir="$AUDIOBOOKS_DIR"
+        }
     fi
     
-    # If we only have m4b files, we'll process those
-    local process_existing_m4b=false
-    if [ -z "$audio_files" ] && [ "$has_m4b_files" = true ]; then
-        echo "Only m4b files found, will process these for metadata and organization" | tee -a "$LOG_FILE"
-        process_existing_m4b=true
-    fi
+    echo "=====================================" | tee -a "$LOG_FILE"
+    echo "Processing: $book_name" | tee -a "$LOG_FILE"
+    echo "------------------------------------" >> "$LOG_FILE"
+    echo "Source directory: $book_dir" >> "$LOG_FILE"
+    echo "Temp directory: $temp_dir" >> "$LOG_FILE"
     
-    # Step 2: Extract metadata from various sources
-    echo "=== PHASE 1: METADATA EXTRACTION ===" >> "$LOG_FILE"
+    # Check if we already have an m4b file in the directory
+    local existing_m4b=$(find "$book_dir" -maxdepth 1 -name "*.m4b" | head -n 1)
     
-    # Initialize metadata variables
-    local author=""
+    # Initialize variables for metadata
     local title=""
+    local author=""
     local narrator=""
-    local series=""
-    local series_part=""
     local year=""
     local genre="Audiobook"
+    local series=""
+    local series_part=""
     local description=""
-    local cover_art=""
     
-    # Track metadata sources for logging
-    local author_source=""
+    # Track where we got the metadata from (for debugging)
     local title_source=""
-    local series_source=""
+    local author_source=""
     local narrator_source=""
     
-    # 2.1: First attempt - directory name
-    echo "Checking directory name pattern: $book_name" | tee -a "$LOG_FILE"
+    # First try to get metadata from directory name
+    if [[ "$book_name" == *" - "* ]]; then
+        author=$(echo "$book_name" | sed -E 's/^(.*) - .*$/\1/g' | xargs)
+        title=$(echo "$book_name" | sed -E 's/^.* - (.*)$/\1/g' | xargs)
+        author_source="directory name"
+        title_source="directory name"
+        echo "- Extracted author from directory name: $author" | tee -a "$LOG_FILE"
+        echo "- Extracted title from directory name: $title" | tee -a "$LOG_FILE"
+    fi
     
-    # Special pattern for numbered collections (e.g., "51 - Battlefield Earth - L Ron Hubbard - 1982")
-    if [[ "$book_name" =~ ^([0-9]+)\ -\ (.+)\ -\ (.+)\ -\ ([0-9]{4})$ ]]; then
-        title="${BASH_REMATCH[2]}"
-        author="${BASH_REMATCH[3]}"
-        year="${BASH_REMATCH[4]}"
-        title_source="directory name (collection)"
-        author_source="directory name (collection)"
-        echo "- Found title from collection directory: $title" | tee -a "$LOG_FILE"
-        echo "- Found author from collection directory: $author" | tee -a "$LOG_FILE"
-        echo "- Found year from collection directory: $year" | tee -a "$LOG_FILE"
-    # Handle regular directory name patterns with dashes
-    elif [[ "$book_name" == *" - "* ]]; then
-        # Handle cases where directory name might contain series information
-        if [[ "$book_name" =~ (.+)\ -\ (.+)\ -\ (.+) ]]; then
-            # Pattern matches Author - Series - Title or similar
-            author=$(echo "$book_name" | cut -d '-' -f 1 | xargs)
-            series=$(echo "$book_name" | cut -d '-' -f 2 | xargs)
-            title=$(echo "$book_name" | cut -d '-' -f 3- | xargs)
-            author_source="directory name"
-            title_source="directory name"
-            series_source="directory name"
-            echo "- Found author from directory: $author" | tee -a "$LOG_FILE"
-            echo "- Found series from directory: $series" | tee -a "$LOG_FILE"
-            echo "- Found title from directory: $title" | tee -a "$LOG_FILE"
-        elif [[ "$book_name" =~ (.+)\ -\ (.+) ]]; then
-            # Simple Author - Title pattern
-            author=$(echo "$book_name" | cut -d '-' -f 1 | xargs)
-            title=$(echo "$book_name" | cut -d '-' -f 2- | xargs)
-            author_source="directory name"
-            title_source="directory name"
-            echo "- Found author from directory: $author" | tee -a "$LOG_FILE"
-            echo "- Found title from directory: $title" | tee -a "$LOG_FILE"
-            
-            # Check if title might actually be a series name without a specific title
-            if [[ "$title" =~ (Series|Cycle|Trilogy|Universe|Verse)$ ]]; then
-                echo "- Title appears to be a series name without a specific book title" | tee -a "$LOG_FILE"
-                series="$title"
-                title="$title Complete Series" # Set a default title for series-only names
-                series_source="directory name"
-                echo "- Treating as series: $series" | tee -a "$LOG_FILE"
-                echo "- Setting default title: $title" | tee -a "$LOG_FILE"
+    # Look for metadata in cover.txt if it exists
+    if [ -f "$book_dir/cover.txt" ]; then
+        echo "- Found cover.txt, extracting metadata" | tee -a "$LOG_FILE"
+        while IFS= read -r line; do
+            if [[ "$line" == "Title:"* ]] && [ -z "$title" ]; then
+                title=$(echo "$line" | sed 's/^Title: *//' | xargs)
+                title_source="cover.txt"
+                echo "- Extracted title from cover.txt: $title" | tee -a "$LOG_FILE"
+            elif [[ "$line" == "Author:"* ]] && [ -z "$author" ]; then
+                author=$(echo "$line" | sed 's/^Author: *//' | xargs)
+                author_source="cover.txt"
+                echo "- Extracted author from cover.txt: $author" | tee -a "$LOG_FILE"
+            elif [[ "$line" == "Narrator:"* ]] && [ -z "$narrator" ]; then
+                narrator=$(echo "$line" | sed 's/^Narrator: *//' | xargs)
+                narrator_source="cover.txt"
+                echo "- Extracted narrator from cover.txt: $narrator" | tee -a "$LOG_FILE"
+            elif [[ "$line" == "Series:"* ]] && [ -z "$series" ]; then
+                series=$(echo "$line" | sed 's/^Series: *//' | xargs)
+                echo "- Extracted series from cover.txt: $series" | tee -a "$LOG_FILE"
+            elif [[ "$line" == "Book:"* ]] && [ -z "$series_part" ]; then
+                series_part=$(echo "$line" | sed 's/^Book: *//' | xargs)
+                echo "- Extracted book number from cover.txt: $series_part" | tee -a "$LOG_FILE"
+            elif [[ "$line" == "Year:"* ]] && [ -z "$year" ]; then
+                year=$(echo "$line" | sed 's/^Year: *//' | xargs)
+                echo "- Extracted year from cover.txt: $year" | tee -a "$LOG_FILE"
+            elif [[ "$line" == "Genre:"* ]] && [ "$genre" == "Audiobook" ]; then
+                genre=$(echo "$line" | sed 's/^Genre: *//' | xargs)
+                echo "- Extracted genre from cover.txt: $genre" | tee -a "$LOG_FILE"
+            elif [[ "$line" == "Description:"* ]] && [ -z "$description" ]; then
+                description=$(echo "$line" | sed 's/^Description: *//' | xargs)
+                echo "- Extracted description from cover.txt: $description" | tee -a "$LOG_FILE"
             fi
+        done < "$book_dir/cover.txt"
+    fi
+    
+    # Try to find cover art
+    local cover_image=""
+    
+    # First check for cover.jpg in main directory
+    if [ -f "$book_dir/cover.jpg" ]; then
+        cover_image="$book_dir/cover.jpg"
+        echo "- Found cover image: cover.jpg" | tee -a "$LOG_FILE"
+    elif [ -f "$book_dir/cover.png" ]; then
+        cover_image="$book_dir/cover.png"
+        echo "- Found cover image: cover.png" | tee -a "$LOG_FILE"
+    elif [ -f "$book_dir/folder.jpg" ]; then
+        cover_image="$book_dir/folder.jpg"
+        echo "- Found cover image: folder.jpg" | tee -a "$LOG_FILE"
+    elif [ -d "$book_dir/cover_art" ]; then
+        # Check for any image in the cover_art directory
+        cover_image=$(find "$book_dir/cover_art" -type f -name "*.jpg" -o -name "*.png" | head -n 1)
+        if [ -n "$cover_image" ]; then
+            echo "- Found cover image in cover_art directory: $(basename "$cover_image")" | tee -a "$LOG_FILE"
         fi
     fi
     
-    # 2.2: Second attempt - Advanced pattern matching on filenames
-    local first_file=$(echo "$audio_files" | head -n 1)
-    local filename=$(basename "$first_file")
-    
-    echo "Checking filename pattern: $filename" | tee -a "$LOG_FILE"
-    
-    # Try to extract metadata from filename patterns
-    local file_metadata=()
-    if extract_filename_metadata "$filename"; then
-        if [ -n "${file_metadata[0]}" ] && ([ -z "$author" ] || [ "$author_source" != "user input" ]); then 
-            author="${file_metadata[0]}"
-            author_source="filename pattern"
-            echo "- Found author from filename: $author" | tee -a "$LOG_FILE"
-        fi
-        
-        if [ -n "${file_metadata[1]}" ] && ([ -z "$title" ] || [ "$title_source" != "user input" ]); then 
-            title="${file_metadata[1]}" 
-            title_source="filename pattern"
-            echo "- Found title from filename: $title" | tee -a "$LOG_FILE"
-        fi
-        
-        if [ -n "${file_metadata[2]}" ]; then 
-            year="${file_metadata[2]}"
-            echo "- Found year from filename: $year" | tee -a "$LOG_FILE"
-        fi
-        
-        if [ -n "${file_metadata[3]}" ]; then 
-            series="${file_metadata[3]}"
-            series_source="filename pattern"
-            echo "- Found series from filename: $series" | tee -a "$LOG_FILE"
-        fi
-        
-        if [ -n "${file_metadata[4]}" ]; then 
-            series_part="${file_metadata[4]}"
-            echo "- Found series part from filename: $series_part" | tee -a "$LOG_FILE"
-        fi
-        
-        if [ -n "${file_metadata[5]}" ]; then 
-            narrator="${file_metadata[5]}"
-            narrator_source="filename pattern"
-            echo "- Found narrator from filename: $narrator" | tee -a "$LOG_FILE"
-        fi
-    else
-        echo "- No filename pattern matched" | tee -a "$LOG_FILE"
-    fi
-    
-    # 2.3: Check file metadata tags
-    echo "Checking file metadata tags from: $first_file" | tee -a "$LOG_FILE"
-    local file_tags=$(ffprobe -v quiet -print_format json -show_format "$first_file")
-    
-    # Only replace if our values are empty or from a lower priority source
-    if [ -z "$author" ] || [ "$author_source" == "directory name" ]; then
-        local tag_author=$(echo "$file_tags" | jq -r '.format.tags.artist // .format.tags.ARTIST // .format.tags.Author // ""')
-        if [ -n "$tag_author" ]; then 
-            author="$tag_author"
-            author_source="file tags"
-            echo "- Found author from tags: $author" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    if [ -z "$title" ] || [ "$title_source" == "directory name" ]; then
-        local tag_title=$(echo "$file_tags" | jq -r '.format.tags.title // .format.tags.TITLE // .format.tags.album // .format.tags.ALBUM // ""')
-        if [ -n "$tag_title" ]; then 
-            title="$tag_title"
-            title_source="file tags"
-            echo "- Found title from tags: $title" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    if [ -z "$narrator" ]; then
-        local tag_narrator=$(echo "$file_tags" | jq -r '.format.tags.composer // .format.tags.COMPOSER // ""')
-        if [ -n "$tag_narrator" ]; then 
-            narrator="$tag_narrator"
-            narrator_source="file tags"
-            echo "- Found narrator from tags: $narrator" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    if [ -z "$series" ]; then
-        local tag_series=$(echo "$file_tags" | jq -r '.format.tags.show // .format.tags.SHOW // ""')
-        if [ -n "$tag_series" ]; then 
-            series="$tag_series"
-            series_source="file tags"
-            echo "- Found series from tags: $series" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    if [ -z "$series_part" ]; then
-        local tag_series_part=$(echo "$file_tags" | jq -r '.format.tags.episode_id // .format.tags.EPISODE_ID // ""')
-        if [ -n "$tag_series_part" ]; then 
-            series_part="$tag_series_part"
-            echo "- Found series part from tags: $series_part" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    if [ -z "$year" ]; then
-        local tag_year=$(echo "$file_tags" | jq -r '.format.tags.date // .format.tags.DATE // ""')
-        if [ -n "$tag_year" ]; then 
-            year="$tag_year"
-            echo "- Found year from tags: $year" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    if [ -z "$genre" ] || [ "$genre" == "Audiobook" ]; then
-        local tag_genre=$(echo "$file_tags" | jq -r '.format.tags.genre // .format.tags.GENRE // ""')
-        if [ -n "$tag_genre" ] && [ "$tag_genre" != "Audiobook" ]; then
-            genre="$tag_genre"
-            echo "- Found genre from tags: $genre" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    # Check parent directory for additional context (like collection or genre information)
-    local parent_dir=$(dirname "$book_dir")
-    local parent_name=$(basename "$parent_dir")
-    echo "Checking parent directory: $parent_name" | tee -a "$LOG_FILE"
-    
-    # If the parent directory is a collection (e.g., "Top 100 Science Fiction")
-    if [[ "$parent_name" =~ [Tt]op|[Bb]est|[Cc]ollection|[Cc]ompilation|[Aa]nthology ]]; then
-        echo "- Parent directory appears to be a collection: $parent_name" | tee -a "$LOG_FILE"
-        
-        # Try to extract genre information from parent directory name
-        if [[ "$parent_name" =~ [Ss]cience[[:space:]]*[Ff]iction ]]; then
-            genre="Science Fiction"
-            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
-        elif [[ "$parent_name" =~ [Ff]antasy ]]; then
-            genre="Fantasy"
-            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
-        elif [[ "$parent_name" =~ [Mm]ystery|[Tt]hriller|[Dd]etective ]]; then
-            genre="Mystery & Thriller"
-            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
-        elif [[ "$parent_name" =~ [Hh]orror ]]; then
-            genre="Horror"
-            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
-        elif [[ "$parent_name" =~ [Hh]istorical|[Hh]istory ]]; then
-            genre="Historical"
-            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    # Special handling for directories that might just be series names or authors
-    
-    # First check for the specific case "Author - SeriesName" (like "Charles Stross - Freyaverse")
-    if [[ "$book_name" =~ ^([^-]+)\ -\ ([^-]+)$ ]] && [ -z "$title" ]; then
-        # This is likely an "Author - Series" format with no book title
-        potential_author=$(echo "$book_name" | cut -d '-' -f 1 | xargs)
-        potential_series=$(echo "$book_name" | cut -d '-' -f 2 | xargs)
-        
-        echo "- Detected potential Author - Series pattern: $potential_author - $potential_series" | tee -a "$LOG_FILE"
-        
-        # Use this metadata if we don't already have author/series
-        if [ -z "$author" ] || [ "$author_source" != "user input" ]; then
-            author="$potential_author"
-            author_source="directory pattern analysis"
-            echo "- Setting author from directory pattern: $author" | tee -a "$LOG_FILE"
-        fi
-        
-        if [ -z "$series" ] || [ "$series_source" != "user input" ]; then
-            series="$potential_series"
-            series_source="directory pattern analysis"
-            echo "- Setting series from directory pattern: $series" | tee -a "$LOG_FILE"
-        fi
-        
-        # Create a default title based on the series
-        if [ -z "$title" ]; then
-            title="$series Complete Series"
-            title_source="derived from series"
-            echo "- Setting default title for series: $title" | tee -a "$LOG_FILE"
-        fi
-    # Also check for series name patterns in the directory name
-    elif [ -z "$series" ] && [[ "$book_name" =~ [Vv]erse$|[Cc]ycle$|[Ss]eries$|[Tt]rilogy$|[Ss]aga$ ]]; then
-        if [ -n "$author" ]; then
-            # If we already have an author but no series, the directory might be a series name
-            series="$book_name"
-            series_source="directory name analysis"
-            echo "- Detected series name from directory: $series" | tee -a "$LOG_FILE"
-            
-            # If we don't have a title yet, create a default one
-            if [ -z "$title" ]; then
-                title="$series Complete Series"
-                title_source="derived from series"
-                echo "- Setting default title for series: $title" | tee -a "$LOG_FILE"
-            fi
-        fi
-    fi
-
-    # If still missing critical metadata, ask user or use defaults for testing
-    if [ -z "$author" ]; then
-        if [ -n "$AUDIOBOOKS_NON_INTERACTIVE" ]; then
-            # In non-interactive mode, use "Unknown Author" as default
-            author="Unknown Author"
-            author_source="default value"
-            echo "- Using default author: $author" | tee -a "$LOG_FILE"
-        else
-            echo "Could not determine author for $book_name"
-            echo "Please enter author name (or press Enter to skip): "
-            read author_input
-            if [ -n "$author_input" ]; then
-                author="$author_input"
-                author_source="user input"
-                echo "- Author set by user: $author" | tee -a "$LOG_FILE"
-            fi
-        fi
-    fi
-    
-    if [ -z "$title" ]; then
-        # If we have the author but no title, try using directory name minus author
-        if [ -n "$author" ] && [[ "$book_name" == *"$author"* ]]; then
-            title=$(echo "$book_name" | sed "s/$author//g" | sed 's/^[ \-]*//g' | sed 's/[ \-]*$//g')
-            if [ -n "$title" ]; then
-                title_source="derived from directory"
-                echo "- Derived title from directory: $title" | tee -a "$LOG_FILE"
-            fi
-        # If we have series but no title, use series as part of title
-        elif [ -n "$series" ] && [ -z "$title" ]; then
-            title="$series"
-            if [ -n "$series_part" ]; then
-                title="$series $series_part"
-            else
-                title="$series Complete Series"
-            fi
-            title_source="derived from series"
-            echo "- Derived title from series: $title" | tee -a "$LOG_FILE"
-        fi
-        
-        # If still no title, prompt user or use default
-        if [ -z "$title" ]; then
-            if [ -n "$AUDIOBOOKS_NON_INTERACTIVE" ]; then
-                # In non-interactive mode, use "Unknown Title" as default
-                title="Unknown Title"
-                title_source="default value"
-                echo "- Using default title: $title" | tee -a "$LOG_FILE"
-            else
-                echo "Could not determine title for $book_name"
-                echo "Please enter title (or press Enter to skip): "
-                read title_input
-                if [ -n "$title_input" ]; then
-                    title="$title_input"
-                    title_source="user input"
-                    echo "- Title set by user: $title" | tee -a "$LOG_FILE"
-                fi
-            fi
-        fi
-    fi
-    
-    # 2.4: Search for cover art in the directory
-    echo "Searching for cover art..." | tee -a "$LOG_FILE"
-    for img in $(find "$book_dir" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) -not -path "$temp_dir/*"); do
-        # Check if filename contains words like cover, folder, front
-        if [[ "$(basename "$img" | tr '[:upper:]' '[:lower:]')" =~ (cover|folder|front|artwork) ]]; then
-            cover_art="$img"
-            echo "- Found cover art with preferred name: $(basename "$cover_art")" | tee -a "$LOG_FILE"
-            break
-        fi
-    done
-    
-    # If we haven't found cover art with preferred name, just use the first image
-    if [ -z "$cover_art" ]; then
-        for img in $(find "$book_dir" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) -not -path "$temp_dir/*" | head -n 1); do
-            if [ -n "$img" ]; then
-                cover_art="$img"
-                echo "- Found cover art: $(basename "$cover_art")" | tee -a "$LOG_FILE"
-                break
-            fi
-        done
-    fi
-    
-    if [ -z "$cover_art" ]; then
-        echo "- No cover art found in directory" | tee -a "$LOG_FILE"
-    fi
-    
-    # We skip online lookups if we have both title and author
-    local skip_online=false
+    # If we have enough info (title and author), try to look up better metadata online
     if [ -n "$title" ] && [ -n "$author" ]; then
-        echo "Book identity established locally: '$title' by '$author'" | tee -a "$LOG_FILE"
+        echo "- Attempting to lookup metadata online for: $title by $author" | tee -a "$LOG_FILE"
         
-        # If we also have series info and cover art, we can skip online
-        if ([ -n "$series" ] || [ -z "$series" ] && [ -z "$series_part" ]) && [ -n "$cover_art" ]; then
-            skip_online=true
-            echo "Sufficient metadata found locally, skipping online lookup" | tee -a "$LOG_FILE"
-        fi
-    fi
-    
-    # 2.5: Online metadata lookup (if needed)
-    if [ "$skip_online" = false ] && [ -n "$title" ] && [ -n "$author" ]; then
-        echo "Fetching improved metadata online..." | tee -a "$LOG_FILE"
-        
-        # Create Python script for metadata lookup
+        # Create a Python script for metadata lookup
         cat > "$temp_dir/metadata_lookup.py" << 'EOF'
 #!/usr/bin/env python3
 import sys
 import json
 import requests
+import urllib.parse
 from bs4 import BeautifulSoup
-from fuzzywuzzy import fuzz
-import re
-import time
+from urllib.parse import quote_plus
+from difflib import SequenceMatcher
+try:
+    from fuzzywuzzy import fuzz
+except ImportError:
+    # If fuzzywuzzy is not available, create a simple ratio function
+    class fuzz:
+        @staticmethod
+        def ratio(a, b):
+            def similar(a, b):
+                return SequenceMatcher(None, a, b).ratio()
+            return similar(a.lower(), b.lower()) * 100
 
-def clean_text(text):
-    return re.sub(r'\s+', ' ', text).strip()
-
-def fetch_goodreads_metadata(title, author):
-    metadata = {
-        'title': title,
-        'author': author,
-        'narrator': '',
-        'series': '',
-        'series_part': '',
-        'year': '',
-        'description': '',
-        'cover_url': '',
-        'genres': []  # Added genre field
+def lookup_book_metadata(title, author):
+    metadata = {}
+    
+    # Prepare search query
+    query = f"{title} {author} book"
+    
+    # Try Goodreads for basic info
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     
+    search_url = f"https://www.goodreads.com/search?q={quote_plus(query)}"
+    
     try:
-        # Form search query
-        query = f"{title} {author} audiobook"
-        search_url = f"https://www.goodreads.com/search?q={query.replace(' ', '+')}"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
-        }
-        
-        response = requests.get(search_url, headers=headers)
+        response = requests.get(search_url, headers=headers, timeout=10)
         
         if response.status_code != 200:
             return metadata
@@ -689,388 +304,198 @@ def fetch_goodreads_metadata(title, author):
             
         book_soup = BeautifulSoup(book_response.text, 'html.parser')
         
-        # Extract metadata
-        # Title (already verified through search)
-        metadata['title'] = best_match.text.strip()
-        
-        # Author
-        author_elem = book_soup.select_one('.authorName')
+        # Extract title (more accurate than search result)
+        title_elem = book_soup.select_one('h1#bookTitle')
+        if title_elem:
+            metadata['title'] = title_elem.text.strip()
+            
+        # Extract author
+        author_elem = book_soup.select_one('.authorName span[itemprop="name"]')
         if author_elem:
             metadata['author'] = author_elem.text.strip()
-        
-        # Series
-        series_elem = book_soup.select_one('.seriesTitle')
+            
+        # Extract series info
+        series_elem = book_soup.select_one('#bookSeries a')
         if series_elem:
             series_text = series_elem.text.strip()
-            # Extract series name and number
-            match = re.search(r'#(\d+(\.\d+)?)', series_text)
-            if match:
-                series_num = match.group(1)
-                series_name = series_text.split('#')[0].strip().rstrip(',')
-                metadata['series'] = series_name
-                metadata['series_part'] = series_num
+            if series_text:
+                # Format is typically "(Series Name #X)"
+                series_text = series_text.strip('()')
+                if '#' in series_text:
+                    series_name, series_num = series_text.split('#', 1)
+                    metadata['series'] = series_name.strip()
+                    metadata['series_part'] = series_num.strip()
+                else:
+                    metadata['series'] = series_text
         
-        # Year
-        year_elem = book_soup.select_one('[itemprop="datePublished"]')
-        if year_elem:
-            year_match = re.search(r'\d{4}', year_elem.text)
+        # Extract publication year
+        pub_elem = book_soup.select_one('#details [itemprop="datePublished"]')
+        if pub_elem:
+            pub_text = pub_elem.text.strip()
+            # Try to extract just the year
+            import re
+            year_match = re.search(r'\b(19|20)\d{2}\b', pub_text)
             if year_match:
                 metadata['year'] = year_match.group(0)
-        
-        # Description
-        desc_elem = book_soup.select_one('#description span:nth-of-type(2)')
+                
+        # Extract genres
+        genres = []
+        genre_elems = book_soup.select('.left .elementList .bookPageGenreLink')
+        for genre_elem in genre_elems[:3]:  # Get top 3 genres
+            genre = genre_elem.text.strip()
+            if genre and genre not in genres:
+                genres.append(genre)
+                
+        if genres:
+            metadata['genres'] = genres
+            
+        # Extract description
+        desc_elem = book_soup.select_one('#description span[style="display:none"]')
         if not desc_elem:
             desc_elem = book_soup.select_one('#description span')
-        if desc_elem:
-            metadata['description'] = clean_text(desc_elem.text)[:500]  # Limit length
-        
-        # Cover URL
-        cover_elem = book_soup.select_one('#coverImage')
-        if cover_elem:
-            metadata['cover_url'] = cover_elem.get('src')
             
-        # Genres
-        genre_elems = book_soup.select('.rightContainer .left a.bookPageGenreLink')
-        genres = []
-        for genre_elem in genre_elems:
-            genre = genre_elem.text.strip()
-            if genre and genre not in genres and len(genres) < 3:  # Limit to top 3 genres
-                genres.append(genre)
-        
-        metadata['genres'] = genres
-        
-        return metadata
-        
+        if desc_elem:
+            metadata['description'] = desc_elem.text.strip()
+            
+        # Try to find narrator info in description
+        if 'description' in metadata:
+            desc = metadata['description'].lower()
+            narrator_markers = ['narrated by', 'narrator:', 'voice of', 'read by']
+            for marker in narrator_markers:
+                if marker in desc:
+                    # Get text after marker up to next punctuation or line break
+                    idx = desc.find(marker) + len(marker)
+                    narrator_text = desc[idx:idx+100]  # Look at next 100 chars
+                    
+                    # Clean up - get text up to punctuation
+                    import re
+                    narrator_match = re.search(r'[^a-zA-Z\s]', narrator_text)
+                    if narrator_match:
+                        narrator_text = narrator_text[:narrator_match.start()]
+                        
+                    narrator_text = narrator_text.strip()
+                    if len(narrator_text) > 0 and len(narrator_text) < 50:  # Reasonable length for a name
+                        metadata['narrator'] = narrator_text.title()  # Convert to title case
+                        break
+            
     except Exception as e:
-        print(f"Error fetching metadata: {str(e)}", file=sys.stderr)
-        return metadata
+        # Just silently return what we have
+        pass
+        
+    return metadata
 
-def fetch_librivox_metadata(title, author):
-    # Simplified implementation for LibriVox search
-    metadata = {
-        'narrator': '',
-        'year': '',
-        'description': ''
-    }
-    
-    try:
-        query = f"{title} {author}"
-        search_url = f"https://librivox.org/search?q={query.replace(' ', '+')}&search_form=advanced"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
-        }
-        
-        response = requests.get(search_url, headers=headers)
-        
-        if response.status_code != 200:
-            return metadata
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Find narrator information
-        reader_elem = soup.select_one('.catalog-result .reader')
-        if reader_elem:
-            metadata['narrator'] = reader_elem.text.replace('Read by:', '').strip()
-        
-        # Description
-        desc_elem = soup.select_one('.catalog-result .book-description')
-        if desc_elem:
-            metadata['description'] = clean_text(desc_elem.text)[:500]  # Limit length
-        
-        return metadata
-        
-    except Exception:
-        return metadata
-
+# Main execution
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: metadata_lookup.py <title> <author>")
+        print("Usage: python metadata_lookup.py 'title' 'author'")
         sys.exit(1)
-    
+        
     title = sys.argv[1]
     author = sys.argv[2]
     
-    # First try Goodreads
-    metadata = fetch_goodreads_metadata(title, author)
-    
-    # Try to supplement with LibriVox data if we're missing narrator
-    if not metadata.get('narrator'):
-        librivox_data = fetch_librivox_metadata(title, author)
-        if librivox_data.get('narrator'):
-            metadata['narrator'] = librivox_data['narrator']
-        if not metadata.get('description') and librivox_data.get('description'):
-            metadata['description'] = librivox_data['description']
-    
-    # Output as JSON
-    print(json.dumps(metadata))
+    result = lookup_book_metadata(title, author)
+    print(json.dumps(result))
 EOF
         
+        # Make the script executable
         chmod +x "$temp_dir/metadata_lookup.py"
         
-        # Run the metadata lookup
-        echo "Looking up metadata for '$title' by '$author'..." | tee -a "$LOG_FILE"
-        metadata_json=$("$temp_dir/metadata_lookup.py" "$title" "$author")
-        
-        # Extract improved metadata if available
-        if [ -n "$metadata_json" ]; then
-            improved_title=$(echo "$metadata_json" | jq -r '.title // ""')
-            improved_author=$(echo "$metadata_json" | jq -r '.author // ""')
-            online_narrator=$(echo "$metadata_json" | jq -r '.narrator // ""')
-            online_series=$(echo "$metadata_json" | jq -r '.series // ""')
-            online_series_part=$(echo "$metadata_json" | jq -r '.series_part // ""')
-            online_year=$(echo "$metadata_json" | jq -r '.year // ""')
-            online_description=$(echo "$metadata_json" | jq -r '.description // ""')
-            online_cover_url=$(echo "$metadata_json" | jq -r '.cover_url // ""')
+        # Run the metadata lookup if python3 is available
+        if command -v python3 &>/dev/null; then
+            echo "Running metadata lookup..." >> "$LOG_FILE"
             
-            # Extract genres
-            online_genres=$(echo "$metadata_json" | jq -r '.genres[]' 2>/dev/null)
-            if [ -n "$online_genres" ]; then
-                # Set primary genre based on first genre from Goodreads
-                primary_genre=$(echo "$online_genres" | head -n 1)
-                if [ -n "$primary_genre" ]; then
-                    genre="$primary_genre"
-                    echo "- Found primary genre: $genre" | tee -a "$LOG_FILE"
+            # Run the metadata lookup script
+            metadata_result=$(python3 "$temp_dir/metadata_lookup.py" "$title" "$author" 2>/dev/null)
+            
+            # Check if we got valid JSON
+            if [ -n "$metadata_result" ] && [ "$(echo "$metadata_result" | grep -c "{")" -gt 0 ]; then
+                echo "- Received metadata from online lookup" | tee -a "$LOG_FILE"
+                
+                # Extract potential improvements from the result
+                improved_title=$(echo "$metadata_result" | grep -o '"title":"[^"]*"' | sed 's/"title":"//;s/"$//')
+                improved_author=$(echo "$metadata_result" | grep -o '"author":"[^"]*"' | sed 's/"author":"//;s/"$//')
+                online_series=$(echo "$metadata_result" | grep -o '"series":"[^"]*"' | sed 's/"series":"//;s/"$//')
+                online_series_part=$(echo "$metadata_result" | grep -o '"series_part":"[^"]*"' | sed 's/"series_part":"//;s/"$//')
+                online_year=$(echo "$metadata_result" | grep -o '"year":"[^"]*"' | sed 's/"year":"//;s/"$//')
+                online_narrator=$(echo "$metadata_result" | grep -o '"narrator":"[^"]*"' | sed 's/"narrator":"//;s/"$//')
+                description=$(echo "$metadata_result" | grep -o '"description":"[^"]*"' | sed 's/"description":"//;s/"$//' | sed 's/\\"/"/g' | head -c 500)
+                
+                # Extract genres
+                online_genres=$(echo "$metadata_result" | grep -o '"genres":\[[^]]*\]' | sed 's/"genres":\[//;s/\]$//' | tr -d '"' | tr ',' '\n')
+                
+                # Use the first genre as our primary
+                if [ -n "$online_genres" ]; then
+                    primary_genre=$(echo "$online_genres" | head -n 1)
+                    if [ -n "$primary_genre" ]; then
+                        genre="$primary_genre"
+                        echo "- Found primary genre: $genre" | tee -a "$LOG_FILE"
+                    fi
+                    
+                    # Log all genres
+                    echo "- Found genres: $(echo "$online_genres" | tr '\n' ', ')" | tee -a "$LOG_FILE"
                 fi
                 
-                # Log all genres
-                echo "- Found genres: $(echo "$online_genres" | tr '\n' ', ')" | tee -a "$LOG_FILE"
-            fi
-            
-            # Use improved metadata if we got it - but respect user input
-            if [ -n "$improved_title" ] && [ "$title_source" != "user input" ]; then
-                title="$improved_title"
-                title_source="online"
-                echo "- Using improved title from online: $title" | tee -a "$LOG_FILE"
-            fi
-            
-            if [ -n "$improved_author" ] && [ "$author_source" != "user input" ]; then
-                author="$improved_author"
-                author_source="online"
-                echo "- Using improved author from online: $author" | tee -a "$LOG_FILE"
-            fi
-            
-            if [ -z "$narrator" ] && [ -n "$online_narrator" ]; then
-                narrator="$online_narrator"
-                narrator_source="online"
-                echo "- Found narrator from online: $narrator" | tee -a "$LOG_FILE"
-            fi
-            
-            if [ -z "$series" ] && [ -n "$online_series" ]; then
-                series="$online_series"
-                series_source="online"
-                echo "- Found series from online: $series" | tee -a "$LOG_FILE"
+                # Use improved metadata if we got it - but respect user input
+                if [ -n "$improved_title" ] && [ "$title_source" != "user input" ]; then
+                    title="$improved_title"
+                    title_source="online"
+                    echo "- Using improved title from online: $title" | tee -a "$LOG_FILE"
+                fi
                 
-                if [ -z "$series_part" ] && [ -n "$online_series_part" ]; then
-                    series_part="$online_series_part"
-                    echo "- Found series part from online: $series_part" | tee -a "$LOG_FILE"
+                if [ -n "$improved_author" ] && [ "$author_source" != "user input" ]; then
+                    author="$improved_author"
+                    author_source="online"
+                    echo "- Using improved author from online: $author" | tee -a "$LOG_FILE"
                 fi
-            fi
-            
-            if [ -z "$year" ] && [ -n "$online_year" ]; then
-                year="$online_year"
-                echo "- Found year from online: $year" | tee -a "$LOG_FILE"
-            fi
-            
-            if [ -z "$description" ] && [ -n "$online_description" ]; then
-                description="$online_description"
-                echo "- Found description from online" | tee -a "$LOG_FILE"
-            fi
-            
-            # Download cover art if we have a URL and no local cover
-            if [ -n "$online_cover_url" ] && [ -z "$cover_art" ]; then
-                echo "- Downloading cover art..." | tee -a "$LOG_FILE"
-                cover_art="$temp_dir/cover.jpg"
-                curl -s -o "$cover_art" "$online_cover_url"
-                if [ -f "$cover_art" ]; then
-                    echo "- Cover art downloaded successfully" | tee -a "$LOG_FILE"
-                else
-                    echo "- Failed to download cover art" | tee -a "$LOG_FILE"
-                    cover_art=""
+                
+                if [ -z "$narrator" ] && [ -n "$online_narrator" ]; then
+                    narrator="$online_narrator"
+                    narrator_source="online"
+                    echo "- Found narrator from online: $narrator" | tee -a "$LOG_FILE"
                 fi
-            fi
-        fi
-    fi
-    
-    # Final check for critical metadata
-    if [ -z "$author" ] || [ -z "$title" ]; then
-        echo "ERROR: Could not determine required metadata for $book_name" | tee -a "$LOG_FILE"
-        echo "Skipping this audiobook" | tee -a "$LOG_FILE"
-        rm -rf "$temp_dir"
-        return
-    fi
-    
-    # Sanitize metadata for file naming
-    author=$(sanitize_filename "$author")
-    title=$(sanitize_filename "$title")
-    
-    echo "=== METADATA SUMMARY ===" | tee -a "$LOG_FILE"
-    echo "Author: $author (from $author_source)" | tee -a "$LOG_FILE"
-    echo "Title: $title (from $title_source)" | tee -a "$LOG_FILE"
-    if [ -n "$narrator" ]; then echo "Narrator: $narrator (from $narrator_source)" | tee -a "$LOG_FILE"; fi
-    if [ -n "$series" ]; then 
-        echo "Series: $series (from $series_source)" | tee -a "$LOG_FILE"
-        if [ -n "$series_part" ]; then echo "Series part: $series_part" | tee -a "$LOG_FILE"; fi
-    fi
-    if [ -n "$year" ]; then echo "Year: $year" | tee -a "$LOG_FILE"; fi
-    if [ -n "$genre" ]; then echo "Genre: $genre" | tee -a "$LOG_FILE"; fi
-    if [ -n "$cover_art" ]; then echo "Cover art: $(basename "$cover_art")" | tee -a "$LOG_FILE"; fi
-    
-    # Step 3: Create concatenated audio file and detect chapters
-    echo "=== PHASE 2: BUILDING M4B FILE ===" | tee -a "$LOG_FILE"
-    echo "Concatenating files and detecting chapters..." | tee -a "$LOG_FILE"
-    
-    # Create a file list for ffmpeg
-    local file_list="$temp_dir/filelist.txt"
-    > "$file_list"
-    
-    # Create a chapters file
-    local chapters_file="$temp_dir/chapters.txt"
-    echo ";FFMETADATA1" > "$chapters_file"
-    
-    local current_time=0
-    local track_num=1
-    local valid_files_count=0
-    
-    # Process each file to get duration and build chapters
-    # First save the IFS value and change it to handle paths with spaces correctly
-    local OLD_IFS="$IFS"
-    IFS=$'\n'
-    for audio_file in $audio_files; do
-        # Print the audio file for debugging
-        echo "Processing audio file: '$audio_file'" | tee -a "$LOG_FILE"
-        
-        # Add to file list for concat with proper escaping (use fully qualified path)
-        if [[ -f "$audio_file" ]]; then
-            audio_file_abs=$(realpath "$audio_file")
-            # Properly escape single quotes in the path for ffmpeg concat format
-            audio_file_escaped="${audio_file_abs//\'/\\\'}"
-            echo "file '${audio_file_escaped}'" >> "$file_list"
-            echo "Added file to list: '$audio_file_abs'" >> "$LOG_FILE"
-            valid_files_count=$((valid_files_count + 1))
-        else
-            echo "Warning: File not found: '$audio_file'" | tee -a "$LOG_FILE"
-            continue
-        fi
-        
-        # Get duration in seconds
-        local duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file")
-        
-        # Check if duration was determined correctly
-        if [ -z "$duration" ]; then
-            echo "Warning: Could not determine duration for file: '$audio_file'" | tee -a "$LOG_FILE"
-            duration=0
-        else
-            duration=${duration%.*} # truncate decimal part
-        fi
-        
-        # Get chapter title from filename
-        local chapter_title=$(basename "$audio_file" | sed 's/\.[^.]*$//')
-        
-        # If chapter title is just a number, add "Chapter" prefix
-        if [[ "$chapter_title" =~ ^[0-9]+$ ]]; then
-            chapter_title="Chapter $chapter_title"
-        fi
-        
-        # Write chapter information
-        echo "[CHAPTER]" >> "$chapters_file"
-        echo "TIMEBASE=1/1000" >> "$chapters_file"
-        echo "START=$((current_time * 1000))" >> "$chapters_file"
-        echo "END=$(((current_time + duration) * 1000))" >> "$chapters_file"
-        echo "title=$chapter_title" >> "$chapters_file"
-        
-        # Update current time
-        current_time=$((current_time + duration))
-        track_num=$((track_num + 1))
-    done
-    
-    # Restore original IFS
-    IFS="$OLD_IFS"
-    
-    # Check if we have any valid files to process
-    if [ $valid_files_count -eq 0 ]; then
-        echo "ERROR: No valid audio files found for processing" | tee -a "$LOG_FILE"
-        echo "Skipping this audiobook" | tee -a "$LOG_FILE"
-        rm -rf "$temp_dir"
-        return
-    fi
-    
-    # Debug info about the files list
-    echo "Total valid audio files found: $valid_files_count" | tee -a "$LOG_FILE"
-    
-    # Step 4: Prepare for creating m4b file
-    echo "Preparing m4b file creation..." | tee -a "$LOG_FILE"
-    
-    # For in-place processing with a simple file structure
-    local target_folder="$book_dir"
-    
-    # Create a simple standardized filename based on metadata
-    local output_filename=""
-    
-    # If we have author and title, create standardized filename
-    if [ -n "$author" ] && [ -n "$title" ]; then
-        # Start with author
-        output_filename="${author}"
-        
-        # Add series info if available
-        if [ -n "$series" ]; then
-            if [ -n "$series_part" ]; then
-                output_filename="${output_filename} - ${series} ${series_part}"
+                
+                if [ -z "$series" ] && [ -n "$online_series" ]; then
+                    series="$online_series"
+                    echo "- Found series from online: $series" | tee -a "$LOG_FILE"
+                    
+                    if [ -z "$series_part" ] && [ -n "$online_series_part" ]; then
+                        series_part="$online_series_part"
+                        echo "- Found series part from online: $series_part" | tee -a "$LOG_FILE"
+                    fi
+                fi
+                
+                if [ -z "$year" ] && [ -n "$online_year" ]; then
+                    year="$online_year"
+                    echo "- Found year from online: $year" | tee -a "$LOG_FILE"
+                fi
+                
+                if [ -n "$description" ]; then
+                    echo "- Found description from online" | tee -a "$LOG_FILE"
+                fi
             else
-                output_filename="${output_filename} - ${series}"
+                echo "- No metadata found online" | tee -a "$LOG_FILE"
             fi
+        else
+            echo "- Python3 not available, skipping online metadata lookup" | tee -a "$LOG_FILE"
         fi
-        
-        # Add title
-        output_filename="${output_filename} - ${title}"
-    else
-        # Fallback to directory name if metadata is incomplete
-        output_filename="$book_name"
     fi
     
-    # Sanitize the output filename
-    output_filename=$(sanitize_filename "$output_filename")
+    # Create progress file for tracking
+    local progress_file="${temp_dir}/progress.txt"
+    touch "$progress_file"
     
-    # Temp output file during processing
-    local temp_output_file="$temp_dir/${output_filename}.m4b"
-    
-    # Create a processed directory in the audiobooks directory if it doesn't exist
-    local processed_dir="$AUDIOBOOKS_DIR/processed"
-    mkdir -p "$processed_dir" 2>/dev/null
-    
-    # Final output file in the processed directory (flat structure)
-    local final_output_file="$processed_dir/${output_filename}.m4b"
-    
-    # Step 5: Create m4b file with metadata, chapters, and cover art (or process existing m4b)
-    if [ "$process_existing_m4b" = true ]; then
-        echo "Processing existing m4b file..." >> "$LOG_FILE"
+    # If we have an existing m4b, we'll use that instead of creating a new one
+    if [ -n "$existing_m4b" ]; then
+        echo "Found existing M4B file: $(basename "$existing_m4b")" | tee -a "$LOG_FILE"
+        echo "Will use this file instead of creating a new one" | tee -a "$LOG_FILE"
         
-        # Find the first m4b file
-        local existing_m4b=$(echo "$m4b_files" | head -n 1)
-        if [ -z "$existing_m4b" ]; then
-            echo "Error: Could not find m4b file despite earlier detection" | tee -a "$LOG_FILE"
-            rm -rf "$temp_dir"
-            return
-        fi
-        
-        echo "Using existing m4b file: $(basename "$existing_m4b")" | tee -a "$LOG_FILE"
-        
-        # If we have an existing m4b, just copy it to the temp directory
-        cp "$existing_m4b" "$temp_output_file" || {
-            echo "Error: Failed to copy existing m4b file to temp directory" | tee -a "$LOG_FILE"
-            rm -rf "$temp_dir"
-            return
-        }
-        
-        # If we don't have sufficient metadata but have an m4b file, extract from it
-        if [ -z "$title" ] || [ -z "$author" ]; then
-            echo "Extracting metadata from existing m4b file..." | tee -a "$LOG_FILE"
-            
-            # Use mediainfo to extract metadata
+        # Extract metadata from the m4b file if available
+        if command -v mediainfo &>/dev/null; then
             local m4b_info=$(mediainfo "$existing_m4b")
             
+            # Extract title if we don't have it
             if [ -z "$title" ]; then
-                local m4b_title=$(echo "$m4b_info" | grep -i "Album" | head -n 1 | cut -d: -f2- | xargs)
+                local m4b_title=$(echo "$m4b_info" | grep -i "^Title " | head -n 1 | cut -d: -f2- | xargs)
                 if [ -n "$m4b_title" ]; then
                     title="$m4b_title"
                     title_source="existing m4b"
@@ -1128,220 +553,208 @@ EOF
     else
         echo "Creating m4b file..." >> "$LOG_FILE"
         
-        # Log if we will be adding cover art
-        if [ -n "$cover_art" ] && [ -f "$cover_art" ]; then
-            echo "Adding cover art from: $cover_art" >> "$LOG_FILE"
-        else
-            echo "No cover art will be added" >> "$LOG_FILE"
-        fi
+        # Find all audio files in the directory
+        echo "Searching for audio files in $book_name..." >> "$LOG_FILE"
         
-        # Log metadata that will be used
-        echo "Using metadata:" >> "$LOG_FILE"
-        echo "- Title: $title" >> "$LOG_FILE"
-        echo "- Author: $author" >> "$LOG_FILE"
-        echo "- Genre: $genre" >> "$LOG_FILE"
-        if [ -n "$narrator" ]; then echo "- Narrator: $narrator" >> "$LOG_FILE"; fi
-        if [ -n "$series" ]; then 
-            echo "- Series: $series" >> "$LOG_FILE"
-            if [ -n "$series_part" ]; then echo "- Series Part: $series_part" >> "$LOG_FILE"; fi
-        fi
-        if [ -n "$year" ]; then echo "- Year: $year" >> "$LOG_FILE"; fi
+        # Get list of audio files
+        audio_files=$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$book_dir" --max-depth 1 | sort)
         
-        # Truncate description if too long
-        if [ -n "$description" ]; then
-            if [ ${#description} -gt 255 ]; then
-                description="${description:0:252}..."
-            fi
-            echo "- Description: (truncated to 255 chars)" >> "$LOG_FILE"
-        fi
-        
-        # We're going to run ffmpeg directly instead of building a command string
-        
-        # Execute the command
-        echo "Converting to m4b format..."
-        # This text won't be displayed to terminal, only in log
-        echo "Running ffmpeg command in background..." >> "$LOG_FILE"
-    
-        # Check if the output directory is writable
-        if [ ! -w "$(dirname "$output_file")" ]; then
-            echo "ERROR: Output directory is not writable: $(dirname "$output_file")" | tee -a "$LOG_FILE"
-            echo "Skipping this audiobook" | tee -a "$LOG_FILE"
+        # Ensure we found audio files
+        if [ -z "$audio_files" ]; then
+            echo "Error: No audio files found in $book_dir" | tee -a "$LOG_FILE"
+            echo "Skipping this directory" | tee -a "$LOG_FILE"
             rm -rf "$temp_dir"
             return
         fi
         
-        # Execute the command with progress bar
-        set +e  # Disable exit on error temporarily
+        # Count files
+        file_count=$(echo "$audio_files" | wc -l)
+        echo "Found $file_count audio files" | tee -a "$LOG_FILE"
         
-        # Redirect stderr to a file for analysis
-    local stderr_file="$temp_dir/ffmpeg_stderr.log"
-    local progress_file="$temp_dir/progress.txt"
-    
-    # Calculate total audio duration in seconds
-    local total_duration=0
-    echo "Calculating total duration..." >> "$LOG_FILE"
-    
-    # Read filelist for more accurate file list
-    if [ -f "$file_list" ]; then
-        # Parse the file list to get the actual files
-        while IFS= read -r line; do
-            # Extract the file path from the line (remove 'file ' prefix and quotes)
-            if [[ "$line" =~ ^file[[:space:]]+\'(.+)\'$ ]]; then
-                local audio_file="${BASH_REMATCH[1]}"
-                if [ -f "$audio_file" ]; then
-                    # Use ffprobe to get the duration
-                    local file_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file" 2>/dev/null)
-                    if [ -n "$file_duration" ] && [[ "$file_duration" =~ ^[0-9]*\.?[0-9]*$ ]]; then
-                        # Convert to integer seconds
-                        file_duration=$(echo "$file_duration" | awk '{printf "%.0f", $1}')
-                        # Make sure it's a valid number
-                        if [[ "$file_duration" =~ ^[0-9]+$ ]]; then
-                            total_duration=$((total_duration + file_duration))
-                            echo "  - File: $(basename "$audio_file"), Duration: $(format_time $file_duration)" >> "$LOG_FILE"
-                        fi
-                    else
-                        echo "  - Could not determine duration for: $(basename "$audio_file")" >> "$LOG_FILE"
-                    fi
-                fi
-            fi
-        done < "$file_list"
-    else
-        echo "Warning: File list not found at $file_list" >> "$LOG_FILE"
-        # Fallback to direct file list
-        for audio_file in $audio_files; do
-            if [ -f "$audio_file" ]; then
-                local file_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file" 2>/dev/null)
-                if [ -n "$file_duration" ] && [[ "$file_duration" =~ ^[0-9]*\.?[0-9]*$ ]]; then
-                    # Convert to integer seconds
-                    file_duration=$(echo "$file_duration" | awk '{printf "%.0f", $1}')
-                    # Make sure it's a valid number
-                    if [[ "$file_duration" =~ ^[0-9]+$ ]]; then
-                        total_duration=$((total_duration + file_duration))
-                        echo "  - File: $(basename "$audio_file"), Duration: $(format_time $file_duration)" >> "$LOG_FILE"
-                    fi
-                else
-                    echo "  - Could not determine duration for: $(basename "$audio_file")" >> "$LOG_FILE"
-                fi
-            fi
-        done
-    fi
-    
-    # Log the total duration
-    if [ "$total_duration" -gt 0 ]; then
-        echo "Total audio duration: $(format_time $total_duration)" >> "$LOG_FILE"
-    else
-        echo "Warning: Could not determine audio duration, using default (1 hour)" >> "$LOG_FILE"
-        # Set a default duration (1 hour) if we couldn't determine actual duration
-        total_duration=3600
-    fi
-    
-    # Try different approaches until one succeeds
-    local try_approach=1
-    
-    # Show that we're working
-    echo "Converting audio files to m4b format (this may take a while)..."
-    echo "ffmpeg conversion running... (spinner will show progress)"
-    
-    # Clear the console buffer before showing the spinner
-    printf "\033c"
-    
-    # Create a simpler progress file
-    echo "0" > "$progress_file"
-    
-    # Debug info for troubleshooting
-    echo "DEBUG: Progress file: $progress_file" >> "$LOG_FILE"
-    echo "DEBUG: Temp output file: $temp_output_file" >> "$LOG_FILE"
-    
-    # Use a simpler progress indicator approach with better error handling
-    progress_indicator() {
-        local spinner=('-' '\\' '|' '/')
-        local sc=0
-        local start_time=$(date +%s)
+        # Extract metadata from first audio file if needed
+        first_file=$(echo "$audio_files" | head -n 1)
         
-        # Create a trap to handle signals
-        trap 'exit 0' TERM INT
-        
-        # Loop until done file exists or we get 10 minutes without progress
-        local last_size=0
-        local stalled_count=0
-        while true; do
-            # Exit if processing is done
-            if [ -f "${progress_file}.done" ]; then
-                break
+        if command -v mediainfo &>/dev/null; then
+            echo "Extracting metadata from audio files..." >> "$LOG_FILE"
+            
+            # Get info from first file
+            media_info=$(mediainfo "$first_file")
+            
+            # Extract title if we don't have it yet
+            if [ -z "$title" ] && grep -q "Title" <<< "$media_info"; then
+                title=$(echo "$media_info" | grep -i "^Title " | head -n 1 | cut -d: -f2- | xargs)
+                title_source="media info"
+                echo "- Extracted title from audio: $title" | tee -a "$LOG_FILE"
             fi
             
-            # Calculate elapsed time
-            elapsed=$(($(date +%s) - start_time))
-            printf "\rWorking [%s] %02d:%02d elapsed" "${spinner[$sc]}" $((elapsed/60)) $((elapsed%60))
-            
-            # Show file size if it exists
-            if [ -f "$temp_output_file" ]; then
-                # Use a more compatible approach to get file size
-                local size_kb=$(du -k "$temp_output_file" 2>/dev/null | cut -f1)
-                if [ -n "$size_kb" ]; then
-                    if [ "$size_kb" -eq "$last_size" ]; then
-                        stalled_count=$((stalled_count + 1))
-                    else
-                        stalled_count=0
-                        last_size=$size_kb
-                    fi
-                    
-                    local size_mb=$(echo "scale=1; $size_kb/1024" | bc 2>/dev/null || echo "0")
-                    printf " (%.1f MB)" "$size_mb"
+            # Extract artist/author if we don't have it yet
+            if [ -z "$author" ]; then
+                # Try Performer tag first (more likely for audiobooks)
+                if grep -q "Performer" <<< "$media_info"; then
+                    author=$(echo "$media_info" | grep -i "Performer" | head -n 1 | cut -d: -f2- | xargs)
+                    author_source="media info (performer)"
+                    echo "- Extracted author from audio (performer): $author" | tee -a "$LOG_FILE"
+                # Then try Artist tag
+                elif grep -q "Artist" <<< "$media_info"; then
+                    author=$(echo "$media_info" | grep -i "Artist" | head -n 1 | cut -d: -f2- | xargs)
+                    author_source="media info (artist)"
+                    echo "- Extracted author from audio (artist): $author" | tee -a "$LOG_FILE"
+                # Then try Album Artist tag
+                elif grep -q "Album/Performer" <<< "$media_info"; then
+                    author=$(echo "$media_info" | grep -i "Album/Performer" | head -n 1 | cut -d: -f2- | xargs)
+                    author_source="media info (album artist)"
+                    echo "- Extracted author from audio (album artist): $author" | tee -a "$LOG_FILE"
                 fi
             fi
             
-            # Exit if we've been stalled for too long (10 minutes)
-            if [ $stalled_count -gt 600 ]; then
-                printf "\rProcessing stalled, may be finished or hung...                   \n"
-                break
+            # Try to get album if we don't have a title
+            if [ -z "$title" ] && grep -q "Album" <<< "$media_info"; then
+                title=$(echo "$media_info" | grep -i "Album" | head -n 1 | cut -d: -f2- | xargs)
+                title_source="media info (album)"
+                echo "- Extracted title from audio (album): $title" | tee -a "$LOG_FILE"
             fi
             
-            sc=$(( (sc+1) % 4 ))
-            sleep 1
-        done
-        printf "\rConversion complete!                                    \n"
-    }
-    
-    # Create the done file if it doesn't exist yet
-    rm -f "${progress_file}.done" 2>/dev/null
-    
-    # Start the progress indicator in the background
-    progress_indicator &
-    
-    # Save progress indicator PID
-    local progress_pid=$!
-    
-    # Cleanup function to ensure we always kill the progress indicator
-    cleanup_progress() {
-        # Signal the indicator to stop
-        touch "${progress_file}.done" 2>/dev/null
-        
-        # Wait a bit and then kill it if still running
-        sleep 1
-        if ps -p $progress_pid > /dev/null 2>&1; then
-            kill -TERM $progress_pid 2>/dev/null || true
+            # If we have a title but not an author, try to extract from title
+            if [ -n "$title" ] && [ -z "$author" ] && [[ "$title" == *" - "* ]]; then
+                author=$(echo "$title" | sed -E 's/^(.*) - .*$/\1/g' | xargs)
+                title=$(echo "$title" | sed -E 's/^.* - (.*)$/\1/g' | xargs)
+                author_source="derived from title"
+                echo "- Extracted author from title: $author" | tee -a "$LOG_FILE"
+                echo "- Updated title: $title" | tee -a "$LOG_FILE"
+            fi
         fi
         
-        # Clear the line
-        printf "\r\033[K"
-    }
-    
-    # Set a trap for script termination
-    trap cleanup_progress EXIT
-    
-    # Run ffmpeg directly with simpler progress handling
-    set +e  # Disable exit on error temporarily
-    
-    # Mark the starting time
-    date +%s > "${progress_file}.start"
-    
-    # Run ffmpeg - we'll simplify the approach for better reliability
-    ffmpeg -y -nostdin -f concat -safe 0 -protocol_whitelist "file,pipe" -i "$file_list" -i "$chapters_file" \
-        $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-i $cover_art") \
-        -map_metadata 1 \
-        $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-map 0:a -map 2:v -disposition:v:0 attached_pic" || echo "-map 0:a") \
-        -c:a aac -b:a 64k -movflags +faststart \
+        # If we still don't have metadata, try extracting from filename
+        if [ -z "$title" ] || [ -z "$author" ]; then
+            echo "Attempting to extract metadata from filenames..." >> "$LOG_FILE"
+            
+            # Try the first file
+            local filename_meta=$(extract_filename_metadata "$first_file")
+            
+            # Extract title
+            if [ -z "$title" ] && grep -q "title=" <<< "$filename_meta"; then
+                title=$(echo "$filename_meta" | grep "title=" | cut -d= -f2-)
+                title_source="filename"
+                echo "- Extracted title from filename: $title" | tee -a "$LOG_FILE"
+            fi
+            
+            # Extract author
+            if [ -z "$author" ] && grep -q "author=" <<< "$filename_meta"; then
+                author=$(echo "$filename_meta" | grep "author=" | cut -d= -f2-)
+                author_source="filename"
+                echo "- Extracted author from filename: $author" | tee -a "$LOG_FILE"
+            fi
+        fi
+        
+        # If we still don't have a title, use the directory name
+        if [ -z "$title" ]; then
+            title="$book_name"
+            title_source="directory name"
+            echo "- Using directory name as title: $title" | tee -a "$LOG_FILE"
+        fi
+        
+        # If we still don't have an author, use default
+        if [ -z "$author" ]; then
+            author="Unknown Author"
+            author_source="default"
+            echo "- Using default author: $author" | tee -a "$LOG_FILE"
+        fi
+        
+        # Generate final output filename from metadata
+        local sanitized_author=$(sanitize_filename "$author")
+        local sanitized_title=$(sanitize_filename "$title")
+        local output_filename="${sanitized_author} - ${sanitized_title}.m4b"
+        
+        # Start progress indicator in background
+        start_time=$(date +%s)
+        {
+            # Function to show spinner
+            progress_indicator() {
+                local symbols=("-" "\\" "|" "/")
+                local delay=0.2
+                local i=0
+                
+                while [ ! -e "${progress_file}.done" ]; do
+                    symbol=${symbols[$i]}
+                    echo -ne "\rProcessing... $symbol"
+                    i=$(( (i+1) % 4 ))
+                    sleep $delay
+                done
+                echo -e "\rProcessing... Done!"
+            }
+            
+            # Set up trap to ensure we clean up when done
+            cleanup_progress() {
+                # Remove flag file
+                rm -f "${progress_file}.done" 2>/dev/null
+                echo -e "\rProcessing... Cancelled"
+                exit
+            }
+            
+            # Set up trap for most common signals
+            trap cleanup_progress EXIT INT TERM
+            
+            # Run progress indicator
+            progress_indicator
+            
+            # Remove the trap when we're done
+            trap - EXIT INT TERM
+            exit 0
+        } &
+        progress_pid=$!
+        
+        # Calculate audio duration if possible (used for progress estimate)
+        echo "Calculating total audio duration..." >> "$LOG_FILE"
+        total_duration_seconds=0
+        
+        # Create file list for ffmpeg
+        echo "Creating file list for ffmpeg..." >> "$LOG_FILE"
+        echo "# File list for ffmpeg" > "$temp_dir/filelist.txt"
+        
+        # Process each audio file
+        i=0
+        for file in $audio_files; do
+            i=$((i+1))
+            echo "[$i/$file_count] Processing $(basename "$file")" >> "$LOG_FILE"
+            
+            # Get duration of this file if possible
+            if command -v mediainfo &>/dev/null; then
+                duration_str=$(mediainfo --Inform="Audio;%Duration%" "$file" 2>/dev/null)
+                if [ -n "$duration_str" ]; then
+                    # Convert to seconds (mediainfo returns milliseconds)
+                    duration_seconds=$(echo "$duration_str / 1000" | bc 2>/dev/null)
+                    if [ -n "$duration_seconds" ]; then
+                        total_duration_seconds=$(echo "$total_duration_seconds + $duration_seconds" | bc)
+                    fi
+                fi
+            fi
+            
+            # Add to file list with proper escaping
+            echo "file '$(echo "$file" | sed "s/'/'\\\''/g")'" >> "$temp_dir/filelist.txt"
+        done
+        
+        # Format the total duration
+        if [ "$total_duration_seconds" -gt 0 ]; then
+            formatted_duration=$(format_time "$total_duration_seconds")
+            echo "Total audio duration: $formatted_duration" >> "$LOG_FILE"
+        else
+            echo "Warning: Could not determine audio duration" >> "$LOG_FILE"
+        fi
+        
+        # Set up paths
+        local temp_output_file="$temp_dir/output.m4b"
+        
+        # Create stderr file for capturing ffmpeg output
+        local stderr_file="$temp_dir/ffmpeg_stderr.txt"
+        
+        # Run ffmpeg to combine all files
+        echo "Running ffmpeg to create m4b file..." >> "$LOG_FILE"
+        
+        # Construct ffmpeg command based on available metadata
+        ffmpeg -f concat -safe 0 -i "$temp_dir/filelist.txt" \
+        -c:a aac -b:a 64k -f mp4 \
+        -map_metadata -1 \
+        $([ -n "$cover_image" ] && echo "-i \"$cover_image\" -map 0:a -map 1:v -disposition:v attached_pic") \
         -metadata title="$title" \
         -metadata artist="$author" \
         -metadata album="$title" \
@@ -1352,56 +765,36 @@ EOF
         $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
         $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
         "$temp_output_file" 2>"$stderr_file"
-    
-    # Save the result
-    local ffmpeg_result=$?
-    
-    # Signal completion to the progress indicator
-    touch "${progress_file}.done" 2>/dev/null
-    
-    set -e  # Re-enable exit on error
-    
-    # Check for common error patterns in stderr
-    if [ -f "$stderr_file" ]; then
-        # Check for the "Enter command" prompt which indicates ffmpeg is waiting for input
-        if grep -q "Enter command:" "$stderr_file"; then
-            echo "ERROR: ffmpeg is waiting for input, which is not possible in a script" | tee -a "$LOG_FILE"
-            echo "This usually happens when there's a problem with the input files or chapters" | tee -a "$LOG_FILE"
+        
+        # Store ffmpeg result
+        ffmpeg_result=$?
+        
+        # Signal progress indicator to stop
+        touch "${progress_file}.done" 2>/dev/null
+        
+        # Wait for progress indicator to exit
+        wait $progress_pid 2>/dev/null
+        progress_pid=""
+        
+        # Check ffmpeg result
+        if [ $ffmpeg_result -ne 0 ]; then
+            echo "ERROR: ffmpeg command failed with exit code $ffmpeg_result" | tee -a "$LOG_FILE"
+            echo "This might be due to permission issues or existing files in the temp directory" | tee -a "$LOG_FILE"
             echo "Skipping this audiobook" | tee -a "$LOG_FILE"
             rm -rf "$temp_dir"
             return
         fi
-        
-        # Check for invalid data errors which often happen with problematic file paths
-        if grep -q "Invalid data found when processing input" "$stderr_file"; then
-            echo "ERROR: Invalid data found when processing input."
-            echo "This is likely due to special characters in file paths or corrupted input files."
-            echo "Try removing apostrophes, quotes or special characters from folder and file names."
-            echo "ERROR: Invalid data found when processing input" >> "$LOG_FILE"
-            echo "This is likely due to special characters in file paths or corrupted input files" >> "$LOG_FILE"
-            echo "Try removing apostrophes, quotes or special characters from folder and file names" >> "$LOG_FILE"
-            echo "Skipping this audiobook" >> "$LOG_FILE"
-            
-            # Log the input file list for debugging
-            echo "Input file list that caused the error:" >> "$LOG_FILE"
-            cat "$file_list" >> "$LOG_FILE"
-            
-            rm -rf "$temp_dir"
-            return
-        fi
-        
-        # Log the stderr for debugging (but don't output to terminal to avoid line number confusion)
-        echo "FFmpeg stderr output saved to log file" >> "$LOG_FILE"
-        cat "$stderr_file" >> "$LOG_FILE"
     fi
     
-    # Check if the command was successful
-    if [ $ffmpeg_result -ne 0 ]; then
-        echo "ERROR: ffmpeg command failed with exit code $ffmpeg_result" | tee -a "$LOG_FILE"
-        echo "This might be due to permission issues or existing files in the temp directory" | tee -a "$LOG_FILE"
-        echo "Skipping this audiobook" | tee -a "$LOG_FILE"
-        rm -rf "$temp_dir"
-        return
+    # Prepare final output path in the processed directory
+    local sanitized_author=$(sanitize_filename "$author")
+    local sanitized_title=$(sanitize_filename "$title")
+    local output_filename="${sanitized_author} - ${sanitized_title}.m4b"
+    
+    # For existing m4b file, use that as the source
+    local final_output_file="$processed_dir/$output_filename"
+    if [ -n "$existing_m4b" ]; then
+        temp_output_file="$existing_m4b"
     fi
     
     # Check if output file was created
