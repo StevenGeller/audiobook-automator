@@ -123,6 +123,15 @@ process_audiobook() {
     local book_count=${#processed_books[@]}
     echo "Processing audiobook $book_count: $book_name"
     
+    # Check if we've already processed this book
+    if is_book_processed "$book_dir"; then
+        echo "Skipping already processed book: $book_name" | tee -a "$LOG_FILE"
+        return
+    fi
+    
+    # Add to processed list before processing to prevent reprocessing
+    processed_books+=("$book_dir")
+    
     # Create a unique temp directory for processing
     local timestamp=$(date +%s)
     local temp_dir="$book_dir/temp_processing_$timestamp"
@@ -148,8 +157,12 @@ process_audiobook() {
     echo "Source directory: $book_dir" >> "$LOG_FILE"
     echo "Temp directory: $temp_dir" >> "$LOG_FILE"
     
-    # Check if we already have an m4b file in the directory
-    local existing_m4b=$(find "$book_dir" -maxdepth 1 -name "*.m4b" | head -n 1)
+    # Check if we already have an m4b file in the directory (more reliable search)
+    local existing_m4b=""
+    if find "$book_dir" -maxdepth 1 -type f -name "*.m4b" 2>/dev/null | grep -q .; then
+        existing_m4b=$(find "$book_dir" -maxdepth 1 -type f -name "*.m4b" | head -n 1)
+        echo "Found existing m4b file: $(basename "$existing_m4b")" | tee -a "$LOG_FILE"
+    fi
     
     # Initialize variables for metadata
     local title=""
@@ -556,8 +569,8 @@ EOF
         # Find all audio files in the directory
         echo "Searching for audio files in $book_name..." >> "$LOG_FILE"
         
-        # Get list of audio files
-        audio_files=$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$book_dir" --max-depth 1 | sort)
+        # Get list of audio files using find instead of fd for better compatibility
+        audio_files=$(find "$book_dir" -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.flac" -o -name "*.wav" -o -name "*.aac" \) | sort)
         
         # Ensure we found audio files
         if [ -z "$audio_files" ]; then
@@ -750,24 +763,157 @@ EOF
         # Run ffmpeg to combine all files
         echo "Running ffmpeg to create m4b file..." >> "$LOG_FILE"
         
-        # Construct ffmpeg command based on available metadata
-        ffmpeg -f concat -safe 0 -i "$temp_dir/filelist.txt" \
-        -c:a aac -b:a 64k -f mp4 \
-        -map_metadata -1 \
-        $([ -n "$cover_image" ] && echo "-i \"$cover_image\" -map 0:a -map 1:v -disposition:v attached_pic") \
-        -metadata title="$title" \
-        -metadata artist="$author" \
-        -metadata album="$title" \
-        -metadata genre="$genre" \
-        $([[ -n "$narrator" ]] && echo "-metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\"") \
-        $([[ -n "$series" ]] && echo "-metadata show=\"$series\"") \
-        $([[ -n "$series" && -n "$series_part" ]] && echo "-metadata episode_id=\"$series_part\"") \
-        $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
-        $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
-        "$temp_output_file" 2>"$stderr_file"
+        # Create a more robust ffmpeg command with proper quoting and escaping
+        # Use a simpler approach with fewer options to avoid command line issues
+        local ffmpeg_cmd="ffmpeg -f concat -safe 0 -i \"$temp_dir/filelist.txt\" -c:a aac -b:a 64k -f mp4 -map_metadata -1"
         
-        # Store ffmpeg result
+        # Add cover image if available
+        if [ -n "$cover_image" ]; then
+            ffmpeg_cmd="$ffmpeg_cmd -i \"$cover_image\" -map 0:a -map 1:v -disposition:v attached_pic"
+        fi
+        
+        # Add basic metadata
+        ffmpeg_cmd="$ffmpeg_cmd -metadata title=\"$title\" -metadata artist=\"$author\" -metadata album=\"$title\" -metadata genre=\"$genre\""
+        
+        # Add optional metadata
+        if [ -n "$narrator" ]; then
+            ffmpeg_cmd="$ffmpeg_cmd -metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\""
+        fi
+        
+        if [ -n "$series" ]; then
+            ffmpeg_cmd="$ffmpeg_cmd -metadata show=\"$series\""
+            if [ -n "$series_part" ]; then
+                ffmpeg_cmd="$ffmpeg_cmd -metadata episode_id=\"$series_part\""
+            fi
+        fi
+        
+        if [ -n "$year" ]; then
+            ffmpeg_cmd="$ffmpeg_cmd -metadata date=\"$year\""
+        fi
+        
+        if [ -n "$description" ]; then
+            # Truncate description to avoid issues
+            local short_desc="${description:0:255}"
+            ffmpeg_cmd="$ffmpeg_cmd -metadata description=\"$short_desc\""
+        fi
+        
+        # Add output file
+        ffmpeg_cmd="$ffmpeg_cmd \"$temp_output_file\""
+        
+        # Log the command
+        echo "Executing: $ffmpeg_cmd" >> "$LOG_FILE"
+        
+        # Create a simpler alternative approach as backup
+        echo "Preparing backup approach in case primary method fails..." >> "$LOG_FILE"
+        
+        # Try the primary approach first
+        eval "$ffmpeg_cmd" 2>"$stderr_file"
         ffmpeg_result=$?
+        
+        # If the primary approach fails, try a more direct approach
+        if [ $ffmpeg_result -ne 0 ]; then
+            echo "First approach failed with code $ffmpeg_result, trying backup method..." | tee -a "$LOG_FILE"
+            
+            # Create a simpler list format
+            awk '{print $2}' "$temp_dir/filelist.txt" | tr -d "'" > "$temp_dir/simplelist.txt"
+            
+            # Try to copy files to temp dir with sequential names to avoid special character issues
+            echo "Copying files to temp directory with sequential names..." >> "$LOG_FILE"
+            mkdir -p "$temp_dir/simple"
+            counter=1
+            
+            while IFS= read -r file; do
+                # Create padded counter (001, 002, etc.)
+                padded_counter=$(printf "%03d" $counter)
+                # Get file extension
+                ext="${file##*.}"
+                # Copy with simple name
+                cp "$file" "$temp_dir/simple/$padded_counter.$ext" 2>/dev/null
+                echo "Copied $file to $temp_dir/simple/$padded_counter.$ext" >> "$LOG_FILE"
+                counter=$((counter + 1))
+            done < "$temp_dir/simplelist.txt"
+            
+            # Try a much simpler ffmpeg command with the renamed files
+            echo "Running simplified ffmpeg command..." | tee -a "$LOG_FILE"
+            
+            # Create a new file list with the renamed files
+            find "$temp_dir/simple" -type f | sort > "$temp_dir/simple/filelist.txt"
+            
+            # Run a simpler ffmpeg command with minimal options
+            # Create a simplified file list
+            for f in "$temp_dir"/simple/*.*; do
+                echo "file '$f'" 
+            done | sort > "$temp_dir/simple/concat_list.txt"
+            
+            # Use the simplified list
+            ffmpeg -f concat -safe 0 -i "$temp_dir/simple/concat_list.txt" \
+                  -c:a aac -b:a 64k \
+                  -metadata title="$title" \
+                  -metadata artist="$author" \
+                  -metadata album="$title" \
+                  "$temp_output_file" 2>>"$stderr_file"
+                  
+            # Update result
+            ffmpeg_result=$?
+            
+            if [ $ffmpeg_result -eq 0 ]; then
+                echo "Backup method succeeded!" | tee -a "$LOG_FILE"
+            else
+                # If that also fails, try an even simpler approach with direct file inputs
+                echo "Second approach failed, trying final method..." | tee -a "$LOG_FILE"
+                
+                # Get all audio files in the temp dir, sort them, and pass directly to ffmpeg
+                input_files=$(find "$temp_dir/simple" -type f -name "*.*" | sort | tr '\n' ' ')
+                
+                # Run the simplest possible ffmpeg command with direct inputs
+                echo "Trying direct conversion with each file individually..." | tee -a "$LOG_FILE"
+                
+                # First convert all files to one format (mp3) to ensure compatibility
+                mkdir -p "$temp_dir/converted"
+                
+                # For each file in the simple directory, convert to standard format
+                find "$temp_dir/simple" -type f | sort | while read -r file; do
+                    base_name=$(basename "$file")
+                    ffmpeg -i "$file" -c:a libmp3lame -q:a 4 "$temp_dir/converted/$base_name.mp3" 2>/dev/null
+                    echo "Converted $(basename "$file") to standard format" >> "$LOG_FILE"
+                done
+                
+                # Now combine the standardized files
+                echo "Combining standardized files..." | tee -a "$LOG_FILE"
+                find "$temp_dir/converted" -type f -name "*.mp3" | sort > "$temp_dir/converted/list.txt"
+                
+                # Use mp3wrap or direct ffmpeg as last resort
+                if command -v mp3wrap &>/dev/null; then
+                    echo "Using mp3wrap to combine files..." | tee -a "$LOG_FILE"
+                    mp3wrap "$temp_dir/combined.mp3" $(cat "$temp_dir/converted/list.txt")
+                else
+                    echo "Using ffmpeg to append files sequentially..." | tee -a "$LOG_FILE"
+                    # Process files one by one
+                    cp "$(head -n 1 "$temp_dir/converted/list.txt")" "$temp_dir/combined.mp3"
+                    
+                    # Skip the first file since we already copied it
+                    tail -n +2 "$temp_dir/converted/list.txt" | while read -r file; do
+                        # Create a temporary file for the concatenation
+                        ffmpeg -i "$temp_dir/combined.mp3" -i "$file" -filter_complex "[0:a][1:a]concat=n=2:v=0:a=1" \
+                               -c:a libmp3lame -q:a 4 "$temp_dir/combined_temp.mp3" 2>/dev/null
+                        # Replace the combined file with the new one
+                        mv "$temp_dir/combined_temp.mp3" "$temp_dir/combined.mp3"
+                    done
+                fi
+                
+                # Convert the combined file to m4b
+                ffmpeg -i "$temp_dir/combined.mp3" \
+                       -c:a aac -b:a 64k \
+                       -metadata title="$title" \
+                       -metadata artist="$author" \
+                       "$temp_output_file" 2>>"$stderr_file"
+                       
+                # Update result
+                ffmpeg_result=$?
+            fi
+        fi
+        
+        # Final result already stored in ffmpeg_result variable
         
         # Signal progress indicator to stop
         touch "${progress_file}.done" 2>/dev/null
@@ -779,7 +925,24 @@ EOF
         # Check ffmpeg result
         if [ $ffmpeg_result -ne 0 ]; then
             echo "ERROR: ffmpeg command failed with exit code $ffmpeg_result" | tee -a "$LOG_FILE"
-            echo "This might be due to permission issues or existing files in the temp directory" | tee -a "$LOG_FILE"
+            
+            # Show more detailed error information to help diagnose issues
+            if [ -f "$stderr_file" ]; then
+                echo "----- ffmpeg error output -----" | tee -a "$LOG_FILE"
+                tail -n 20 "$stderr_file" | tee -a "$LOG_FILE"
+                echo "----- end ffmpeg error output -----" | tee -a "$LOG_FILE"
+            fi
+            
+            # Check for common issues
+            if grep -q "Permission denied" "$stderr_file" 2>/dev/null; then
+                echo "ERROR: Permission issues detected. Make sure you have write access to the output directory." | tee -a "$LOG_FILE"
+            elif grep -q "No such file or directory" "$stderr_file" 2>/dev/null; then
+                echo "ERROR: Some files or directories could not be accessed. This may be due to special characters in filenames." | tee -a "$LOG_FILE"
+            elif grep -q "Invalid data found when processing input" "$stderr_file" 2>/dev/null; then
+                echo "ERROR: Some audio files may be corrupted or in an unsupported format." | tee -a "$LOG_FILE"
+            fi
+            
+            echo "RECOMMENDATION: Try processing this audiobook manually or rename the files to remove special characters." | tee -a "$LOG_FILE"
             echo "Skipping this audiobook" | tee -a "$LOG_FILE"
             rm -rf "$temp_dir"
             return
@@ -973,6 +1136,7 @@ is_book_processed() {
         fi
         
         if [ "$dir_canonical" = "$check_dir_canonical" ]; then
+            echo "Directory already processed in this run: $(basename "$check_dir")" >> "$LOG_FILE"
             return 0 # Already processed
         fi
     done
@@ -981,9 +1145,7 @@ is_book_processed() {
     local dir_name=$(basename "$check_dir")
     if ls "$AUDIOBOOKS_DIR/processed/$dir_name.m4b" 2>/dev/null || ls "$AUDIOBOOKS_DIR/processed/${dir_name}*.m4b" 2>/dev/null; then
         echo "Directory already has a processed m4b file in the output directory" >> "$LOG_FILE"
-        # Allow reprocessing by returning 1 (not processed)
-        # This lets the script process multiple books in one run
-        return 1
+        return 0 # Mark as processed to prevent reprocessing
     fi
     
     return 1 # Not processed yet
@@ -1043,9 +1205,6 @@ process_directory() {
     
     # Process if we have audio files OR m4b files
     if [ "$has_audio_files" = true ] || [ "$has_m4b_files" = true ]; then
-        # Add to processed list (before processing, to prevent reprocessing if something goes wrong)
-        processed_books+=("$dir")
-        
         if [ "$has_audio_files" = true ]; then
             echo "Found audiobook with audio files: $dir_name"
             echo "${indent}Found audio files in $dir_name" >> "$LOG_FILE"
@@ -1055,6 +1214,7 @@ process_directory() {
         fi
         
         # Always process the audiobook, even if it's an m4b
+        # The process_audiobook function will handle checking if it's already processed
         process_audiobook "$dir"
     fi
     

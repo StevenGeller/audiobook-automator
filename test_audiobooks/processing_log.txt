@@ -1,0 +1,92 @@
+Audiobook Processing Log - Sun Mar 16 17:26:34 PDT 2025
+Starting batch processing of audiobooks in test_audiobooks
+Output directory structure created in: test_audiobooks/processed
+Directory structure:
+test_audiobooks/processed/Children
+test_audiobooks/processed/Fiction
+test_audiobooks/processed/Fiction/Fantasy
+test_audiobooks/processed/Fiction/General
+test_audiobooks/processed/Fiction/Historical
+test_audiobooks/processed/Fiction/Mystery & Thriller
+test_audiobooks/processed/Fiction/Romance
+test_audiobooks/processed/Fiction/Science Fiction
+test_audiobooks/processed/Non-Fiction
+test_audiobooks/processed/Non-Fiction/Biography
+test_audiobooks/processed/Non-Fiction/Business
+test_audiobooks/processed/Non-Fiction/General
+test_audiobooks/processed/Non-Fiction/History
+test_audiobooks/processed/Non-Fiction/Science
+test_audiobooks/processed/Non-Fiction/Self-Help
+test_audiobooks/processed/Series
+test_audiobooks/processed/Unsorted
+-------------------------------------------
+Checking directory: test_audiobooks/Author Name - Book Title
+Found audio files in test_audiobooks/Author Name - Book Title
+Processing: Author Name - Book Title
+Gathering audio files...
+Debug - Audio files found:        2 files
+=== PHASE 1: METADATA EXTRACTION ===
+Checking directory name pattern: Author Name - Book Title
+- Found author from directory: Author Name
+- Found title from directory: Book Title
+Checking filename pattern: 01.mp3
+- No filename pattern matched
+Checking file metadata tags from: test_audiobooks/Author Name - Book Title/01.mp3
+Searching for cover art...
+- Found cover art with preferred name: cover.jpg
+Book identity established locally: 'Book Title' by 'Author Name'
+Sufficient metadata found locally, skipping online lookup
+=== METADATA SUMMARY ===
+Author: Author_Name (from directory name)
+Title: Book_Title (from directory name)
+Genre: Audiobook
+Cover art: cover.jpg
+=== PHASE 2: BUILDING M4B FILE ===
+Concatenating files and detecting chapters...
+Processing audio file: 'test_audiobooks/Author Name - Book Title/01.mp3'
+Added file to list: '/Users/steven/Programming/Personal/audiobook-automator/test_audiobooks/Author Name - Book Title/01.mp3'
+Processing audio file: 'test_audiobooks/Author Name - Book Title/02.mp3'
+Added file to list: '/Users/steven/Programming/Personal/audiobook-automator/test_audiobooks/Author Name - Book Title/02.mp3'
+Preparing m4b file creation...
+Creating m4b file...
+Running ffmpeg command...
+Successfully created: test_audiobooks/Author Name - Book Title/temp_processing/Author_Name - Book_Title.m4b
+Moved file to: test_audiobooks/processed/Unsorted/Author_Name/Author_Name - Book_Title.m4b
+File info:
+Complete name                            : test_audiobooks/processed/Unsorted/Author_Name/Author_Name - Book_Title.m4b
+Format                                   : MPEG-4
+Format profile                           : Apple audio with iTunes info
+Duration                                 : 10 s 67 ms
+Album                                    : Book_Title
+Track name                               : Book_Title
+Performer                                : Author_Name
+Format                                   : AAC LC
+Format/Info                              : Advanced Audio Codec Low Complexity
+Duration                                 : 10 s 67 ms
+Format                                   : Timed Text
+Duration                                 : 10 s 0 ms
+Processing completed for: Author Name - Book Title
+-------------------------------------------
+Checking directory: test_audiobooks/Author Name - Book Title/cover_art
+Batch processing completed. Check test_audiobooks/processing_log.txt for details.
+-------------------------------------------
+Processing Summary:
+Total audiobooks processed: 1
+Books organized by category:
+- Fiction/Fantasy:        0
+- Fiction/Science Fiction:        0
+- Fiction/Mystery & Thriller:        0
+- Fiction/Historical:        0
+- Fiction/Romance:        0
+- Fiction/General:        0
+- Non-Fiction/History:        0
+- Non-Fiction/Science:        0
+- Non-Fiction/Self-Help:        0
+- Non-Fiction/Biography:        0
+- Non-Fiction/Business:        0
+- Non-Fiction/General:        0
+- Children:        0
+- Series:        0
+- Unsorted:        1
+-------------------------------------------
+Finished. Audio books organized in: test_audiobooks/processed
