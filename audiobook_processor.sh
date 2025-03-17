@@ -1029,7 +1029,7 @@ EOF
             if [ -n "$watchdog_pid" ]; then
                 kill $watchdog_pid > /dev/null 2>&1 || true
             fi
-        }
+        fi
         if [ -n "$watchdog_pid" ]; then
             kill "$watchdog_pid" 2>/dev/null || true
         fi
@@ -1242,7 +1242,7 @@ EOF
                 if [ -n "$fallback_watchdog_pid" ]; then
                     kill $fallback_watchdog_pid > /dev/null 2>&1 || true
                 fi
-            }
+            fi
             if [ -n "$fallback_watchdog_pid" ]; then
                 kill "$fallback_watchdog_pid" 2>/dev/null || true
             fi
