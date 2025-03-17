@@ -196,7 +196,7 @@ process_audiobook() {
     echo "Processing audiobook $book_count: $book_name"
     echo "Processing audiobook $book_count: $book_name" >> "$LOG_FILE"
     
-    # For network shares, use a local temp directory to avoid permission issues
+    # For network shares, use a local temp directory in the user's home directory to avoid permission issues
     # Create a unique hash of the book directory path to use as an identifier
     # Use md5 on macOS and md5sum on Linux
     if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -204,7 +204,7 @@ process_audiobook() {
     else
         local dir_hash=$(echo "$book_dir" | md5sum | cut -d' ' -f1)
     fi
-    local temp_base="/tmp/audiobook_processor"
+    local temp_base="$HOME/.audiobook_processor_temp"
     local temp_dir="${temp_base}/${dir_hash}"
     
     # Ensure the base temp directory exists
@@ -1319,7 +1319,11 @@ process_directory() {
             echo "${indent}Found $subdirs_count subdirectories in $dir_name, processing each..." >> "$LOG_FILE"
             
             # Use find to get subdirectories but process them in a separate loop to prevent subshell issues
-            readarray -t subdirs < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*")
+            # Compatible approach for older bash versions that don't have readarray
+            local subdirs=()
+            while IFS= read -r line; do
+                subdirs+=("$line")
+            done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*")
             
             for subdir in "${subdirs[@]}"; do
                 process_directory "$subdir" $((level + 2))
@@ -1333,7 +1337,11 @@ process_directory() {
 }
 
 # Main directory processing - use array instead of pipe to prevent subshell issues
-readarray -t top_dirs < <(find "$AUDIOBOOKS_DIR" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*")
+# Compatible approach for older bash versions that don't have readarray
+top_dirs=()
+while IFS= read -r line; do
+    top_dirs+=("$line")
+done < <(find "$AUDIOBOOKS_DIR" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*")
 
 # Count total top-level directories
 echo "Found ${#top_dirs[@]} top-level directories to process"
