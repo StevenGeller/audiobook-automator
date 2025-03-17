@@ -1012,8 +1012,12 @@ EOF
     # Temp output file during processing
     local temp_output_file="$temp_dir/${output_filename}.m4b"
     
-    # Final output file in the same directory as the input
-    local final_output_file="$book_dir/${output_filename}.m4b"
+    # Create a processed directory in the audiobooks directory if it doesn't exist
+    local processed_dir="$AUDIOBOOKS_DIR/processed"
+    mkdir -p "$processed_dir" 2>/dev/null
+    
+    # Final output file in the processed directory (flat structure)
+    local final_output_file="$processed_dir/${output_filename}.m4b"
     
     # Step 5: Create m4b file with metadata, chapters, and cover art
     echo "Creating m4b file..." >> "$LOG_FILE"
@@ -1298,31 +1302,59 @@ EOF
             # Only delete if we have a successful m4b AND at least one original file
             if [ -f "$final_output_file" ] && [ "$file_count" -gt 0 ]; then
                 # Verify the m4b file has a reasonable size compared to original files
-                local m4b_size=$(stat -f %z "$final_output_file")
+                local m4b_size=0
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    m4b_size=$(stat -f %z "$final_output_file" 2>/dev/null || echo 0)
+                else
+                    m4b_size=$(stat -c %s "$final_output_file" 2>/dev/null || echo 0)
+                fi
+                
                 local total_original_size=0
                 for file in $original_files; do
                     if [ -f "$file" ]; then
-                        file_size=$(stat -f %z "$file")
+                        local file_size=0
+                        if [[ "$OSTYPE" == "darwin"* ]]; then
+                            file_size=$(stat -f %z "$file" 2>/dev/null || echo 0)
+                        else
+                            file_size=$(stat -c %s "$file" 2>/dev/null || echo 0)
+                        fi
                         total_original_size=$((total_original_size + file_size))
                     fi
                 done
                 
                 # Ensure the m4b is at least 50% the size of the original files
                 # This is a failsafe to prevent deleting originals if the m4b is corrupted
-                if [ $m4b_size -gt $((total_original_size / 2)) ]; then
+                if [ $m4b_size -gt 0 ] && [ $total_original_size -gt 0 ] && [ $m4b_size -gt $((total_original_size / 2)) ]; then
                     echo "M4B file size ($m4b_size bytes) is reasonable compared to originals ($total_original_size bytes)" | tee -a "$LOG_FILE"
                     echo "Removing original audio files..." | tee -a "$LOG_FILE"
                     
                     # Delete each file individually for better control
                     echo "Removing original files..." 
+                    local deleted_count=0
                     for file in $original_files; do
                         if [ -f "$file" ]; then
-                            rm "$file"
-                            echo "Deleted: $file" >> "$LOG_FILE"
+                            if rm "$file" 2>/dev/null; then
+                                echo "Deleted: $file" >> "$LOG_FILE"
+                                deleted_count=$((deleted_count + 1))
+                            else
+                                echo "Failed to delete: $file" >> "$LOG_FILE"
+                            fi
                         fi
                     done
                     
-                    echo "Original files cleaned up successfully" >> "$LOG_FILE"
+                    if [ $deleted_count -gt 0 ]; then
+                        echo "Original files cleaned up successfully ($deleted_count files deleted)" >> "$LOG_FILE"
+                    else
+                        echo "Warning: Failed to delete any original files" >> "$LOG_FILE"
+                    fi
+                    
+                    # Optionally, try to remove the directory if it's empty
+                    if [ "$book_dir" != "$AUDIOBOOKS_DIR" ]; then
+                        if [ -z "$(ls -A "$book_dir")" ]; then
+                            echo "Directory is now empty, attempting to remove it" >> "$LOG_FILE"
+                            rmdir "$book_dir" 2>/dev/null && echo "Removed empty directory: $book_dir" >> "$LOG_FILE"
+                        fi
+                    fi
                 else
                     echo "WARNING: M4B file size ($m4b_size bytes) is too small compared to originals ($total_original_size bytes)" | tee -a "$LOG_FILE"
                     echo "Keeping original files as a precaution" | tee -a "$LOG_FILE"
