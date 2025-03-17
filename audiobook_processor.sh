@@ -964,6 +964,8 @@ is_book_processed() {
         check_dir_canonical="$check_dir"
     fi
     
+    # Check if we're already processing this directory in this run
+    # (prevents infinite recursion but allows multiple books per run)
     for dir in "${processed_books[@]}"; do
         local dir_canonical=$(cd "$dir" 2>/dev/null && pwd -P)
         if [ -z "$dir_canonical" ]; then
@@ -974,6 +976,15 @@ is_book_processed() {
             return 0 # Already processed
         fi
     done
+    
+    # Check for already processed m4b file in the processed directory
+    local dir_name=$(basename "$check_dir")
+    if ls "$AUDIOBOOKS_DIR/processed/$dir_name.m4b" 2>/dev/null || ls "$AUDIOBOOKS_DIR/processed/${dir_name}*.m4b" 2>/dev/null; then
+        echo "Directory already has a processed m4b file in the output directory" >> "$LOG_FILE"
+        # Allow reprocessing by returning 1 (not processed)
+        # This lets the script process multiple books in one run
+        return 1
+    fi
     
     return 1 # Not processed yet
 }
