@@ -1205,14 +1205,28 @@ EOF
     fi
     
     # Clean up temporary directory
-    rm -rf "$temp_dir"
+    chmod -R +w "$temp_dir" 2>/dev/null
+    rm -rf "$temp_dir" 2>/dev/null
+    
+    # If the directory still exists, try a more forceful approach
+    if [ -d "$temp_dir" ]; then
+        echo "Warning: Could not remove temp directory using standard method, trying alternative..." >> "$LOG_FILE"
+        find "$temp_dir" -type f -exec rm -f {} \; 2>/dev/null
+        find "$temp_dir" -type d -empty -delete 2>/dev/null
+        rmdir "$temp_dir" 2>/dev/null
+        
+        # If still exists, just warn but continue
+        if [ -d "$temp_dir" ]; then
+            echo "Warning: Temp directory could not be fully cleaned up: $temp_dir" >> "$LOG_FILE"
+        fi
+    fi
     echo "Processing completed for: $book_name" | tee -a "$LOG_FILE"
     echo "-------------------------------------------" | tee -a "$LOG_FILE"
 }
 
 # Main script execution
-echo "Starting in-place processing of audiobooks in $AUDIOBOOKS_DIR"
-echo "Starting in-place processing of audiobooks in $AUDIOBOOKS_DIR" >> "$LOG_FILE"
+echo "Starting recursive audiobook processing in $AUDIOBOOKS_DIR"
+echo "Starting recursive audiobook processing in $AUDIOBOOKS_DIR" >> "$LOG_FILE"
 if [ "$KEEP_ORIGINAL_FILES" = true ]; then
     echo "Original files will be kept after processing (--keep-original-files flag is set)"
     echo "Original files will be kept after processing (--keep-original-files flag is set)" >> "$LOG_FILE"
@@ -1220,32 +1234,48 @@ else
     echo "Original files will be removed after successful m4b conversion"
     echo "Original files will be removed after successful m4b conversion" >> "$LOG_FILE"
 fi
+echo "Will search all nested directories for audio files automatically"
+echo "Will search all nested directories for audio files automatically" >> "$LOG_FILE"
 echo "-------------------------------------------" >> "$LOG_FILE"
 
-# Find all potential audiobook directories (containing audio files)
-find "$AUDIOBOOKS_DIR" -type d -not -path "*/temp_processing*" | while read -r dir; do
-    # Skip the main directory itself
-    if [ "$dir" = "$AUDIOBOOKS_DIR" ]; then
-        continue
-    fi
+# Function to process directories recursively
+process_directory() {
+    local dir="$1"
+    local level="$2"
+    local indent=$(printf '%*s' "$level" '')
+    
+    local dir_name=$(basename "$dir")
     
     # Debug info
-    echo "Checking directory: $dir" >> "$LOG_FILE"
+    echo "${indent}Checking directory: $dir_name" >> "$LOG_FILE"
     
     # Check if directory contains audio files using a more robust approach
     if fd -e mp3 -e m4a -e flac -e wav -e aac . "$dir" --max-depth 1 | grep -q .; then
-        echo "Found audio files in $dir" >> "$LOG_FILE"
+        # Only print to console if we actually found audio files to process
+        echo "Found audiobook: $dir_name"
+        echo "${indent}Found audio files in $dir_name" >> "$LOG_FILE"
         process_audiobook "$dir"
     else
-        echo "No audio files found directly in $dir, checking if it's a series/author directory..." | tee -a "$LOG_FILE"
+        echo "${indent}No audio files found directly in $dir_name, checking subdirectories..." >> "$LOG_FILE"
         # Check if there are subdirectories that might contain audio files
-        if find "$dir" -mindepth 1 -maxdepth 1 -type d | grep -q .; then
-            echo "Found subdirectories in $dir, treating as a collection directory" | tee -a "$LOG_FILE"
-            # Don't process this directory directly, as it's likely just a container for multiple audiobooks
+        if find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | grep -q .; then
+            local subdirs_count=$(find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | wc -l)
+            echo "Scanning folder: $dir_name ($subdirs_count subdirectories)"
+            echo "${indent}Found $subdirs_count subdirectories in $dir_name, processing each..." >> "$LOG_FILE"
+            
+            # Process each subdirectory recursively
+            find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | while read -r subdir; do
+                process_directory "$subdir" $((level + 2))
+            done
         else
-            echo "No subdirectories or audio files found in $dir, skipping" | tee -a "$LOG_FILE"
+            echo "${indent}No subdirectories or audio files found in $dir_name, skipping" >> "$LOG_FILE"
         fi
     fi
+}
+
+# Main directory processing
+find "$AUDIOBOOKS_DIR" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | while read -r dir; do
+    process_directory "$dir" 0
 done
 
 echo "Batch processing completed. Check $LOG_FILE for details."
@@ -1256,6 +1286,8 @@ echo "-------------------------------------------" >> "$LOG_FILE"
 echo "Processing Summary:" >> "$LOG_FILE"
 processed_count=$(grep -c "Processing completed for:" "$LOG_FILE")
 m4b_count=$(find "$AUDIOBOOKS_DIR" -type f -name "*.m4b" | wc -l)
+checked_dirs=$(grep -c "Checking directory:" "$LOG_FILE")
+echo "Total directories checked: $checked_dirs" >> "$LOG_FILE"
 echo "Total audiobooks processed: $processed_count" >> "$LOG_FILE"
 echo "Total m4b files: $m4b_count" >> "$LOG_FILE"
 echo "-------------------------------------------" >> "$LOG_FILE"
@@ -1263,5 +1295,6 @@ echo "Finished. Audio books processed in: $AUDIOBOOKS_DIR" >> "$LOG_FILE"
 
 # Show concise summary to the user
 echo "-------------------------------------------"
-echo "Processing Summary: $processed_count audiobooks processed, $m4b_count m4b files created"
+echo "Processing Summary: $processed_count audiobooks processed"
+echo "Scanned $checked_dirs directories, created $m4b_count m4b files"
 echo "Finished. See $LOG_FILE for details."
