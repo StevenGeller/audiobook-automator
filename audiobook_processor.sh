@@ -1,5 +1,19 @@
 #!/bin/bash
+#
 # Audiobook Processor - Converts audio files to m4b format with proper metadata
+# 
+# This script handles audiobook conversion with robust error handling
+# and clear progress indications even for complex file paths.
+#
+# Bash strict mode for more reliable error detection
+set -o errexit    # Exit on error
+set -o pipefail   # Exit if any command in a pipe fails
+set -o nounset    # Error on unset variables
+
+# Enable debug mode if requested
+if [[ "${DEBUG:-}" == "1" ]]; then
+    set -o xtrace  # Print commands as they execute
+fi
 
 # Default behavior: remove original files after successful conversion
 KEEP_ORIGINAL_FILES=false
@@ -680,29 +694,65 @@ EOF
         local sanitized_title=$(sanitize_filename "$title")
         local output_filename="${sanitized_author} - ${sanitized_title}.m4b"
         
-        # Start progress indicator in background
+        # Start enhanced progress indicator with more information
         start_time=$(date +%s)
+        
+        # Create status tracking files
+        echo "Initializing..." > "$temp_dir/status.txt"
+        echo "0" > "$temp_dir/progress.txt"
+        
         {
-            # Function to show spinner
+            # Function to show detailed progress with percentage and status
             progress_indicator() {
                 local symbols=("-" "\\" "|" "/")
-                local delay=0.2
+                local delay=1.0
                 local i=0
+                local percentage="0"
+                local elapsed=0
+                local status_msg=""
+                local file_processed=0
+                local total_files=$audio_file_count
                 
                 while [ ! -e "${progress_file}.done" ]; do
+                    # Get current status
+                    if [ -f "$temp_dir/status.txt" ]; then
+                        status_msg=$(cat "$temp_dir/status.txt" 2>/dev/null || echo "Working...")
+                    fi
+                    
+                    # Get progress percentage
+                    if [ -f "$temp_dir/progress.txt" ]; then
+                        file_processed=$(cat "$temp_dir/progress.txt" 2>/dev/null || echo "0")
+                        if [ "$total_files" -gt 0 ]; then
+                            percentage=$(( (file_processed * 100) / total_files ))
+                        fi
+                    fi
+                    
+                    # Calculate elapsed time
+                    current_time=$(date +%s)
+                    elapsed=$((current_time - start_time))
+                    
+                    # Format elapsed time as HH:MM:SS
+                    elapsed_formatted=$(printf "%02d:%02d:%02d" $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
+                    
+                    # Show progress with file counts, percentage and status
                     symbol=${symbols[$i]}
-                    echo -ne "\rProcessing... $symbol"
+                    printf "\rProcessing... %s | %s | Files: %d/%d | %d%% complete | %s" \
+                           "$symbol" "$elapsed_formatted" "$file_processed" "$total_files" \
+                           "$percentage" "$status_msg"
+                    
                     i=$(( (i+1) % 4 ))
                     sleep $delay
                 done
-                echo -e "\rProcessing... Done!"
+                
+                # Clear the line and show completion
+                printf "\rProcessing... Done!                                                                     \n"
             }
             
             # Set up trap to ensure we clean up when done
             cleanup_progress() {
                 # Remove flag file
                 rm -f "${progress_file}.done" 2>/dev/null
-                echo -e "\rProcessing... Cancelled"
+                printf "\rProcessing... Cancelled                                                               \n"
                 exit
             }
             
@@ -728,9 +778,13 @@ EOF
         
         # Process each audio file
         i=0
+        echo "Building file list..." > "$temp_dir/status.txt"
         while IFS= read -r file; do
             i=$((i+1))
             echo "[$i/$audio_file_count] Processing $(basename "$file")" >> "$LOG_FILE"
+            # Update progress for indicator
+            echo "$i" > "$temp_dir/progress.txt"
+            echo "Adding file: $(basename "$file")" > "$temp_dir/status.txt"
             
             # Get duration of this file if possible
             if command -v mediainfo &>/dev/null; then
@@ -765,97 +819,173 @@ EOF
         
         # Run ffmpeg to combine all files
         echo "Running ffmpeg to create m4b file..." >> "$LOG_FILE"
+        echo "Starting audio conversion..." > "$temp_dir/status.txt"
         
-        # Create a more robust ffmpeg command with proper quoting and escaping
-        # Use a simpler approach with fewer options to avoid command line issues
-        local ffmpeg_cmd="ffmpeg -f concat -safe 0 -i \"$temp_dir/filelist.txt\" -c:a aac -b:a 64k -f mp4 -map_metadata -1"
+        # Create array-based approach for more reliable execution
+        local ffmpeg_args=()
+        
+        # Base ffmpeg command with input
+        ffmpeg_args+=(-f concat -safe 0 -i "$temp_dir/filelist.txt")
         
         # Add cover image if available
         if [ -n "$cover_image" ]; then
-            ffmpeg_cmd="$ffmpeg_cmd -i \"$cover_image\" -map 0:a -map 1:v -disposition:v attached_pic"
+            ffmpeg_args+=(-i "$cover_image" -map 0:a -map 1:v -disposition:v attached_pic)
         fi
         
-        # Add basic metadata
-        ffmpeg_cmd="$ffmpeg_cmd -metadata title=\"$title\" -metadata artist=\"$author\" -metadata album=\"$title\" -metadata genre=\"$genre\""
+        # Add encoding parameters
+        ffmpeg_args+=(-c:a aac -b:a 64k -f mp4 -map_metadata -1)
+        
+        # Add all metadata as separate arguments
+        ffmpeg_args+=(-metadata "title=$title" -metadata "artist=$author" 
+                     -metadata "album=$title" -metadata "genre=$genre")
         
         # Add optional metadata
         if [ -n "$narrator" ]; then
-            ffmpeg_cmd="$ffmpeg_cmd -metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\""
+            ffmpeg_args+=(-metadata "composer=$narrator" -metadata "comment=Narrator: $narrator")
         fi
         
         if [ -n "$series" ]; then
-            ffmpeg_cmd="$ffmpeg_cmd -metadata show=\"$series\""
+            ffmpeg_args+=(-metadata "show=$series")
             if [ -n "$series_part" ]; then
-                ffmpeg_cmd="$ffmpeg_cmd -metadata episode_id=\"$series_part\""
+                ffmpeg_args+=(-metadata "episode_id=$series_part")
             fi
         fi
         
         if [ -n "$year" ]; then
-            ffmpeg_cmd="$ffmpeg_cmd -metadata date=\"$year\""
+            ffmpeg_args+=(-metadata "date=$year")
         fi
         
         if [ -n "$description" ]; then
             # Truncate description to avoid issues
             local short_desc="${description:0:255}"
-            ffmpeg_cmd="$ffmpeg_cmd -metadata description=\"$short_desc\""
+            ffmpeg_args+=(-metadata "description=$short_desc")
         fi
         
         # Add output file
-        ffmpeg_cmd="$ffmpeg_cmd \"$temp_output_file\""
+        ffmpeg_args+=("$temp_output_file")
         
         # Log the command
-        echo "Executing: $ffmpeg_cmd" >> "$LOG_FILE"
+        echo "Executing ffmpeg with ${#ffmpeg_args[@]} arguments" >> "$LOG_FILE"
         
-        # Create a simpler alternative approach as backup
-        echo "Preparing backup approach in case primary method fails..." >> "$LOG_FILE"
+        # Setup progress monitoring in background
+        {
+            while [ ! -e "${progress_file}.done" ]; do
+                if [ -f "$stderr_file" ]; then
+                    # Extract time information from stderr for progress
+                    if grep -q "time=" "$stderr_file"; then
+                        time_info=$(grep -o "time=[0-9:.]*" "$stderr_file" | tail -n 1 | cut -d= -f2)
+                        echo "Converting: $time_info elapsed" > "$temp_dir/status.txt"
+                    fi
+                fi
+                sleep 1
+            done
+        } &
+        progress_monitor_pid=$!
         
-        # Try the primary approach first
-        eval "$ffmpeg_cmd" 2>"$stderr_file"
+        # Try the primary approach with array (most reliable)
+        ffmpeg "${ffmpeg_args[@]}" 2>"$stderr_file"
         ffmpeg_result=$?
+        
+        # Kill progress monitor when done
+        kill $progress_monitor_pid 2>/dev/null || true
         
         # If the primary approach fails, try a more direct approach
         if [ $ffmpeg_result -ne 0 ]; then
             echo "First approach failed with code $ffmpeg_result, trying backup method..." | tee -a "$LOG_FILE"
             
-            # Create a simpler list format - extract the paths from between single quotes
-            # Using perl for more reliable processing of quotes
-            perl -ne "if (/'([^']+)'/) { print \"\$1\n\"; }" "$temp_dir/filelist.txt" > "$temp_dir/simplelist.txt"
+            # Create a simpler list format - extract the paths properly
+            echo "Trying fallback method with simplified filenames..." > "$temp_dir/status.txt"
+            
+            # Extract files from filelist using robust pattern detection
+            sed -n "s/^file '\\(.*\\)'$/\\1/p" "$temp_dir/filelist.txt" > "$temp_dir/simplelist.txt"
+            
+            # Verify we found files
+            file_count=$(wc -l < "$temp_dir/simplelist.txt")
+            if [ $file_count -eq 0 ]; then
+                echo "ERROR: No files found in file list. Trying directory scan..." | tee -a "$LOG_FILE"
+                # Fallback to direct directory search
+                find "$book_dir" -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.flac" -o -name "*.wav" -o -name "*.aac" \) | sort > "$temp_dir/simplelist.txt"
+                file_count=$(wc -l < "$temp_dir/simplelist.txt")
+            fi
+            
+            echo "Found $file_count files to process in fallback method" | tee -a "$LOG_FILE"
             
             # Try to copy files to temp dir with sequential names to avoid special character issues
-            echo "Copying files to temp directory with sequential names..." >> "$LOG_FILE"
+            echo "Preparing files with sequential names..." > "$temp_dir/status.txt"
+            echo "Copying files to temp directory with sequential names..." | tee -a "$LOG_FILE"
             mkdir -p "$temp_dir/simple"
             counter=1
+            total_files=$file_count
             
+            # Display progress while copying
             while IFS= read -r file; do
                 # Create padded counter (001, 002, etc.)
                 padded_counter=$(printf "%03d" $counter)
-                # Get file extension
+                # Get file extension (defaulting to mp3 if extraction fails)
                 ext="${file##*.}"
-                # Copy with simple name
-                cp "$file" "$temp_dir/simple/$padded_counter.$ext" 2>/dev/null
-                echo "Copied $file to $temp_dir/simple/$padded_counter.$ext" >> "$LOG_FILE"
+                [ -z "$ext" ] && ext="mp3"
+                
+                # Show progress
+                echo "Copying file $counter of $total_files..." > "$temp_dir/status.txt"
+                echo $counter > "$temp_dir/progress.txt"
+                
+                # Only copy if file exists and is readable
+                if [ -f "$file" ] && [ -r "$file" ]; then
+                    cp "$file" "$temp_dir/simple/$padded_counter.$ext" 2>/dev/null || echo "Failed to copy $file" >> "$LOG_FILE"
+                    echo "Copied $(basename "$file") to $padded_counter.$ext" >> "$LOG_FILE"
+                else
+                    echo "WARNING: Cannot access file: $file" | tee -a "$LOG_FILE"
+                fi
                 counter=$((counter + 1))
             done < "$temp_dir/simplelist.txt"
             
-            # Try a much simpler ffmpeg command with the renamed files
+            # Verify we have copied files
+            simple_count=$(find "$temp_dir/simple" -type f | wc -l)
+            echo "Successfully copied $simple_count of $total_files files" | tee -a "$LOG_FILE"
+            
+            if [ $simple_count -eq 0 ]; then
+                echo "ERROR: No files were copied to the temporary directory" | tee -a "$LOG_FILE"
+                echo "File copy operation failed" > "$temp_dir/status.txt"
+                return 1
+            fi
+            
+            # Create a new concat file with the renamed simple files
+            echo "Preparing fallback conversion..." > "$temp_dir/status.txt"
+            echo "# Simple ffmpeg file list" > "$temp_dir/simple/concat_list.txt"
+            find "$temp_dir/simple" -type f | sort | while read -r f; do
+                echo "file '$f'" >> "$temp_dir/simple/concat_list.txt"
+            done
+            
+            # Use array-based approach for more reliable ffmpeg command
             echo "Running simplified ffmpeg command..." | tee -a "$LOG_FILE"
             
-            # Create a new file list with the renamed files
-            find "$temp_dir/simple" -type f | sort > "$temp_dir/simple/filelist.txt"
+            # Set up array for fallback method (minimal parameters for better reliability)
+            local fallback_args=()
+            fallback_args+=(-f concat -safe 0 -i "$temp_dir/simple/concat_list.txt")
+            fallback_args+=(-c:a aac -b:a 64k)
+            fallback_args+=(-metadata "title=$title" -metadata "artist=$author" -metadata "album=$title")
+            fallback_args+=("$temp_output_file")
             
-            # Run a simpler ffmpeg command with minimal options
-            # Create a simplified file list
-            find "$temp_dir/simple" -type f -name "*.*" | sort | while read -r f; do
-                printf "file '%s'\n" "$f"
-            done > "$temp_dir/simple/concat_list.txt"
+            # Setup progress monitoring
+            {
+                while [ ! -e "${progress_file}.done" ]; do
+                    if [ -f "$stderr_file" ]; then
+                        if grep -q "time=" "$stderr_file"; then
+                            time_info=$(grep -o "time=[0-9:.]*" "$stderr_file" | tail -n 1 | cut -d= -f2)
+                            echo "Fallback conversion: $time_info elapsed" > "$temp_dir/status.txt"
+                        fi
+                    fi
+                    sleep 1
+                done
+            } &
+            fallback_monitor_pid=$!
             
-            # Use the simplified list
-            ffmpeg -f concat -safe 0 -i "$temp_dir/simple/concat_list.txt" \
-                  -c:a aac -b:a 64k \
-                  -metadata title="$title" \
-                  -metadata artist="$author" \
-                  -metadata album="$title" \
-                  "$temp_output_file" 2>>"$stderr_file"
+            # Execute the fallback approach
+            ffmpeg "${fallback_args[@]}" 2>>"$stderr_file"
+            ffmpeg_result=$?
+            
+            # Kill progress monitor
+            kill $fallback_monitor_pid 2>/dev/null || true
                   
             # Update result
             ffmpeg_result=$?
