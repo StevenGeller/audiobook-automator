@@ -180,12 +180,37 @@ process_audiobook() {
     # 2.1: First attempt - directory name
     echo "Checking directory name pattern: $book_name" | tee -a "$LOG_FILE"
     if [[ "$book_name" == *" - "* ]]; then
-        author=$(echo "$book_name" | cut -d '-' -f 1 | xargs)
-        title=$(echo "$book_name" | cut -d '-' -f 2- | xargs)
-        author_source="directory name"
-        title_source="directory name"
-        echo "- Found author from directory: $author" | tee -a "$LOG_FILE"
-        echo "- Found title from directory: $title" | tee -a "$LOG_FILE"
+        # Handle cases where directory name might contain series information
+        if [[ "$book_name" =~ (.+)\ -\ (.+)\ -\ (.+) ]]; then
+            # Pattern matches Author - Series - Title or similar
+            author=$(echo "$book_name" | cut -d '-' -f 1 | xargs)
+            series=$(echo "$book_name" | cut -d '-' -f 2 | xargs)
+            title=$(echo "$book_name" | cut -d '-' -f 3- | xargs)
+            author_source="directory name"
+            title_source="directory name"
+            series_source="directory name"
+            echo "- Found author from directory: $author" | tee -a "$LOG_FILE"
+            echo "- Found series from directory: $series" | tee -a "$LOG_FILE"
+            echo "- Found title from directory: $title" | tee -a "$LOG_FILE"
+        elif [[ "$book_name" =~ (.+)\ -\ (.+) ]]; then
+            # Simple Author - Title pattern
+            author=$(echo "$book_name" | cut -d '-' -f 1 | xargs)
+            title=$(echo "$book_name" | cut -d '-' -f 2- | xargs)
+            author_source="directory name"
+            title_source="directory name"
+            echo "- Found author from directory: $author" | tee -a "$LOG_FILE"
+            echo "- Found title from directory: $title" | tee -a "$LOG_FILE"
+            
+            # Check if title might actually be a series name without a specific title
+            if [[ "$title" =~ (Series|Cycle|Trilogy|Universe|Verse)$ ]]; then
+                echo "- Title appears to be a series name without a specific book title" | tee -a "$LOG_FILE"
+                series="$title"
+                title="$title Complete Series" # Set a default title for series-only names
+                series_source="directory name"
+                echo "- Treating as series: $series" | tee -a "$LOG_FILE"
+                echo "- Setting default title: $title" | tee -a "$LOG_FILE"
+            fi
+        fi
     fi
     
     # 2.2: Second attempt - Advanced pattern matching on filenames
@@ -299,6 +324,24 @@ process_audiobook() {
         fi
     fi
     
+    # Special handling for directories that might just be series names or authors
+    # Check if book_name might be just a series name (like "Freyaverse")
+    if [ -z "$series" ] && [[ "$book_name" =~ [Vv]erse$|[Cc]ycle$|[Ss]eries$|[Tt]rilogy$|[Ss]aga$ ]]; then
+        if [ -n "$author" ]; then
+            # If we already have an author but no series, the directory might be a series name
+            series="$book_name"
+            series_source="directory name analysis"
+            echo "- Detected series name from directory: $series" | tee -a "$LOG_FILE"
+            
+            # If we don't have a title yet, create a default one
+            if [ -z "$title" ]; then
+                title="$series Complete Series"
+                title_source="derived from series"
+                echo "- Setting default title for series: $title" | tee -a "$LOG_FILE"
+            fi
+        fi
+    fi
+
     # If still missing critical metadata, ask user or use defaults for testing
     if [ -z "$author" ]; then
         if [ -n "$AUDIOBOOKS_NON_INTERACTIVE" ]; then
@@ -326,6 +369,16 @@ process_audiobook() {
                 title_source="derived from directory"
                 echo "- Derived title from directory: $title" | tee -a "$LOG_FILE"
             fi
+        # If we have series but no title, use series as part of title
+        elif [ -n "$series" ] && [ -z "$title" ]; then
+            title="$series"
+            if [ -n "$series_part" ]; then
+                title="$series $series_part"
+            else
+                title="$series Complete Series"
+            fi
+            title_source="derived from series"
+            echo "- Derived title from series: $title" | tee -a "$LOG_FILE"
         fi
         
         # If still no title, prompt user or use default
@@ -925,6 +978,15 @@ find "$AUDIOBOOKS_DIR" -type d -not -path "$OUTPUT_DIR*" -not -path "*/temp_proc
     if fd -e mp3 -e m4a -e flac -e wav -e aac . "$dir" --max-depth 1 | grep -q .; then
         echo "Found audio files in $dir" | tee -a "$LOG_FILE"
         process_audiobook "$dir"
+    else
+        echo "No audio files found directly in $dir, checking if it's a series/author directory..." | tee -a "$LOG_FILE"
+        # Check if there are subdirectories that might contain audio files
+        if find "$dir" -mindepth 1 -maxdepth 1 -type d | grep -q .; then
+            echo "Found subdirectories in $dir, treating as a collection directory" | tee -a "$LOG_FILE"
+            # Don't process this directory directly, as it's likely just a container for multiple audiobooks
+        else
+            echo "No subdirectories or audio files found in $dir, skipping" | tee -a "$LOG_FILE"
+        fi
     fi
 done
 
