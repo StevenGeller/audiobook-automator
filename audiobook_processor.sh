@@ -28,8 +28,6 @@ for arg in "$@"; do
     fi
 done
 
-LOG_FILE="$AUDIOBOOKS_DIR/processing_log.txt"
-
 # Check if directory was provided
 if [ -z "$AUDIOBOOKS_DIR" ]; then
     echo "Please provide the path to your audiobooks directory"
@@ -37,11 +35,38 @@ if [ -z "$AUDIOBOOKS_DIR" ]; then
     exit 1
 fi
 
+# Ensure the audiobooks directory exists
+if [ ! -d "$AUDIOBOOKS_DIR" ]; then
+    echo "Error: The directory $AUDIOBOOKS_DIR does not exist"
+    exit 1
+fi
+
+# Create the log file in the audiobooks directory
+LOG_FILE="$AUDIOBOOKS_DIR/processing_log.txt"
+
+# Check if we can write to the directory
+if [ ! -w "$AUDIOBOOKS_DIR" ]; then
+    echo "Warning: No write permission to $AUDIOBOOKS_DIR"
+    echo "Using temporary log file in home directory instead"
+    LOG_FILE="$HOME/audiobook_processing_log.txt"
+fi
+
 # We will process files in place, no need for a separate output directory
 OUTPUT_DIR="$AUDIOBOOKS_DIR"
 
 # Initialize log file
-echo "Audiobook Processing Log - $(date)" > "$LOG_FILE"
+if ! echo "Audiobook Processing Log - $(date)" > "$LOG_FILE" 2>/dev/null; then
+    echo "Warning: Could not create log file at $LOG_FILE"
+    echo "Continuing without logging to file"
+    # Create a dummy log function that does nothing
+    log() { :; }
+else
+    # Create a log function that both displays and logs
+    log() {
+        echo "$@"
+        echo "$@" >> "$LOG_FILE"
+    }
+fi
 
 # Function to sanitize filenames for cross-platform compatibility
 sanitize_filename() {
