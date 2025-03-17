@@ -380,8 +380,36 @@ process_audiobook() {
     fi
     
     # Special handling for directories that might just be series names or authors
-    # Check if book_name might be just a series name (like "Freyaverse")
-    if [ -z "$series" ] && [[ "$book_name" =~ [Vv]erse$|[Cc]ycle$|[Ss]eries$|[Tt]rilogy$|[Ss]aga$ ]]; then
+    
+    # First check for the specific case "Author - SeriesName" (like "Charles Stross - Freyaverse")
+    if [[ "$book_name" =~ ^([^-]+)\ -\ ([^-]+)$ ]] && [ -z "$title" ]; then
+        # This is likely an "Author - Series" format with no book title
+        potential_author=$(echo "$book_name" | cut -d '-' -f 1 | xargs)
+        potential_series=$(echo "$book_name" | cut -d '-' -f 2 | xargs)
+        
+        echo "- Detected potential Author - Series pattern: $potential_author - $potential_series" | tee -a "$LOG_FILE"
+        
+        # Use this metadata if we don't already have author/series
+        if [ -z "$author" ] || [ "$author_source" != "user input" ]; then
+            author="$potential_author"
+            author_source="directory pattern analysis"
+            echo "- Setting author from directory pattern: $author" | tee -a "$LOG_FILE"
+        fi
+        
+        if [ -z "$series" ] || [ "$series_source" != "user input" ]; then
+            series="$potential_series"
+            series_source="directory pattern analysis"
+            echo "- Setting series from directory pattern: $series" | tee -a "$LOG_FILE"
+        fi
+        
+        # Create a default title based on the series
+        if [ -z "$title" ]; then
+            title="$series Complete Series"
+            title_source="derived from series"
+            echo "- Setting default title for series: $title" | tee -a "$LOG_FILE"
+        fi
+    # Also check for series name patterns in the directory name
+    elif [ -z "$series" ] && [[ "$book_name" =~ [Vv]erse$|[Cc]ycle$|[Ss]eries$|[Tt]rilogy$|[Ss]aga$ ]]; then
         if [ -n "$author" ]; then
             # If we already have an author but no series, the directory might be a series name
             series="$book_name"
@@ -808,6 +836,7 @@ EOF
     
     local current_time=0
     local track_num=1
+    local valid_files_count=0
     
     # Process each file to get duration and build chapters
     # First save the IFS value and change it to handle paths with spaces correctly
@@ -822,13 +851,22 @@ EOF
             audio_file_abs=$(realpath "$audio_file")
             echo "file '$audio_file_abs'" >> "$file_list"
             echo "Added file to list: '$audio_file_abs'" | tee -a "$LOG_FILE"
+            valid_files_count=$((valid_files_count + 1))
         else
             echo "Warning: File not found: '$audio_file'" | tee -a "$LOG_FILE"
+            continue
         fi
         
         # Get duration in seconds
         local duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file")
-        duration=${duration%.*} # truncate decimal part
+        
+        # Check if duration was determined correctly
+        if [ -z "$duration" ]; then
+            echo "Warning: Could not determine duration for file: '$audio_file'" | tee -a "$LOG_FILE"
+            duration=0
+        else
+            duration=${duration%.*} # truncate decimal part
+        fi
         
         # Get chapter title from filename
         local chapter_title=$(basename "$audio_file" | sed 's/\.[^.]*$//')
@@ -852,6 +890,17 @@ EOF
     
     # Restore original IFS
     IFS="$OLD_IFS"
+    
+    # Check if we have any valid files to process
+    if [ $valid_files_count -eq 0 ]; then
+        echo "ERROR: No valid audio files found for processing" | tee -a "$LOG_FILE"
+        echo "Skipping this audiobook" | tee -a "$LOG_FILE"
+        rm -rf "$temp_dir"
+        return
+    fi
+    
+    # Debug info about the files list
+    echo "Total valid audio files found: $valid_files_count" | tee -a "$LOG_FILE"
     
     # Step 4: Prepare for creating m4b file
     echo "Preparing m4b file creation..." | tee -a "$LOG_FILE"
@@ -929,8 +978,8 @@ EOF
     # Step 5: Create m4b file with metadata, chapters, and cover art
     echo "Creating m4b file..." | tee -a "$LOG_FILE"
     
-    # Prepare ffmpeg command (with -y to force overwrite)
-    local ffmpeg_cmd="ffmpeg -y -f concat -safe 0 -i \"$file_list\" -i \"$chapters_file\""
+    # Prepare ffmpeg command (with -y to force overwrite and -nostdin for non-interactive mode)
+    local ffmpeg_cmd="ffmpeg -y -nostdin -f concat -safe 0 -i \"$file_list\" -i \"$chapters_file\""
     
     # Add cover art if available
     if [ -n "$cover_art" ] && [ -f "$cover_art" ]; then
@@ -994,9 +1043,27 @@ EOF
     
     # Execute the command and capture the result
     set +e  # Disable exit on error temporarily
-    eval "$ffmpeg_cmd"
+    # Redirect stderr to a file for analysis
+    local stderr_file="$temp_dir/ffmpeg_stderr.log"
+    eval "$ffmpeg_cmd 2>$stderr_file"
     local ffmpeg_result=$?
     set -e  # Re-enable exit on error
+    
+    # Check for common error patterns in stderr
+    if [ -f "$stderr_file" ]; then
+        # Check for the "Enter command" prompt which indicates ffmpeg is waiting for input
+        if grep -q "Enter command:" "$stderr_file"; then
+            echo "ERROR: ffmpeg is waiting for input, which is not possible in a script" | tee -a "$LOG_FILE"
+            echo "This usually happens when there's a problem with the input files or chapters" | tee -a "$LOG_FILE"
+            echo "Skipping this audiobook" | tee -a "$LOG_FILE"
+            rm -rf "$temp_dir"
+            return
+        fi
+        
+        # Log the stderr for debugging
+        echo "FFmpeg stderr output:" | tee -a "$LOG_FILE"
+        cat "$stderr_file" | tee -a "$LOG_FILE"
+    fi
     
     # Check if the command was successful
     if [ $ffmpeg_result -ne 0 ]; then
