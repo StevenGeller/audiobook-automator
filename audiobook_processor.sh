@@ -139,6 +139,13 @@ process_audiobook() {
     
     # Create a temporary directory for processing
     local temp_dir="$book_dir/temp_processing"
+    
+    # Check if temp directory already exists (from a previous failed run)
+    if [ -d "$temp_dir" ]; then
+        echo "Found existing temp directory, cleaning up first..." | tee -a "$LOG_FILE"
+        rm -rf "$temp_dir"
+    fi
+    
     mkdir -p "$temp_dir"
     
     # Step 1: Gather audiobook files (mp3, m4a, flac, etc.)
@@ -874,8 +881,8 @@ EOF
     # Step 5: Create m4b file with metadata, chapters, and cover art
     echo "Creating m4b file..." | tee -a "$LOG_FILE"
     
-    # Prepare ffmpeg command
-    local ffmpeg_cmd="ffmpeg -f concat -safe 0 -i \"$file_list\" -i \"$chapters_file\""
+    # Prepare ffmpeg command (with -y to force overwrite)
+    local ffmpeg_cmd="ffmpeg -y -f concat -safe 0 -i \"$file_list\" -i \"$chapters_file\""
     
     # Add cover art if available
     if [ -n "$cover_art" ] && [ -f "$cover_art" ]; then
@@ -928,7 +935,29 @@ EOF
     
     # Execute the command
     echo "Running ffmpeg command..." | tee -a "$LOG_FILE"
+    
+    # Check if the output directory is writable
+    if [ ! -w "$(dirname "$output_file")" ]; then
+        echo "ERROR: Output directory is not writable: $(dirname "$output_file")" | tee -a "$LOG_FILE"
+        echo "Skipping this audiobook" | tee -a "$LOG_FILE"
+        rm -rf "$temp_dir"
+        return
+    fi
+    
+    # Execute the command and capture the result
+    set +e  # Disable exit on error temporarily
     eval "$ffmpeg_cmd"
+    local ffmpeg_result=$?
+    set -e  # Re-enable exit on error
+    
+    # Check if the command was successful
+    if [ $ffmpeg_result -ne 0 ]; then
+        echo "ERROR: ffmpeg command failed with exit code $ffmpeg_result" | tee -a "$LOG_FILE"
+        echo "This might be due to permission issues or existing files in the temp directory" | tee -a "$LOG_FILE"
+        echo "Skipping this audiobook" | tee -a "$LOG_FILE"
+        rm -rf "$temp_dir"
+        return
+    fi
     
     # Check if output file was created
     if [ -f "$output_file" ]; then
