@@ -881,8 +881,10 @@ EOF
         # Add to file list for concat with proper escaping (use fully qualified path)
         if [[ -f "$audio_file" ]]; then
             audio_file_abs=$(realpath "$audio_file")
-            echo "file '$audio_file_abs'" >> "$file_list"
-            echo "Added file to list: '$audio_file_abs'" | tee -a "$LOG_FILE"
+            # Properly escape single quotes in the path for ffmpeg concat format
+            audio_file_escaped="${audio_file_abs//\'/\\\'}"
+            echo "file '${audio_file_escaped}'" >> "$file_list"
+            echo "Added file to list: '$audio_file_abs'" >> "$LOG_FILE"
             valid_files_count=$((valid_files_count + 1))
         else
             echo "Warning: File not found: '$audio_file'" | tee -a "$LOG_FILE"
@@ -1021,26 +1023,32 @@ EOF
         fi
     done
     
+    # Try different approaches until one succeeds
+    local try_approach=1
+    
     # Run ffmpeg in background to allow progress monitoring
     (
-        # Run ffmpeg with progress output
-        ffmpeg -y -nostdin -f concat -safe 0 -i "$file_list" -i "$chapters_file" \
-            $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-i $cover_art") \
-            -map_metadata 1 \
-            $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-map 0:a -map 2:v -disposition:v:0 attached_pic" || echo "-map 0:a") \
-            -c:a aac -b:a 64k -movflags +faststart \
-            -metadata title="$title" \
-            -metadata artist="$author" \
-            -metadata album="$title" \
-            -metadata genre="$genre" \
-            $([[ -n "$narrator" ]] && echo "-metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\"") \
-            $([[ -n "$series" ]] && echo "-metadata show=\"$series\"") \
-            $([[ -n "$series" && -n "$series_part" ]] && echo "-metadata episode_id=\"$series_part\"") \
-            $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
-            $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
-            -progress - "$temp_output_file" 2>"$stderr_file" | \
-        grep --line-buffered -o "out_time_ms=[0-9]*" | grep --line-buffered -o "[0-9]*" | \
-        awk '{printf "%d\n", $1/1000000}' > "$progress_file"
+        # First approach: Most compatible concat with protocol whitelist
+        if [ $try_approach -eq 1 ]; then
+            echo "Using standard concat approach..." >> "$LOG_FILE"
+            ffmpeg -y -nostdin -f concat -safe 0 -protocol_whitelist "file,pipe" -i "$file_list" -i "$chapters_file" \
+                $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-i $cover_art") \
+                -map_metadata 1 \
+                $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-map 0:a -map 2:v -disposition:v:0 attached_pic" || echo "-map 0:a") \
+                -c:a aac -b:a 64k -movflags +faststart \
+                -metadata title="$title" \
+                -metadata artist="$author" \
+                -metadata album="$title" \
+                -metadata genre="$genre" \
+                $([[ -n "$narrator" ]] && echo "-metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\"") \
+                $([[ -n "$series" ]] && echo "-metadata show=\"$series\"") \
+                $([[ -n "$series" && -n "$series_part" ]] && echo "-metadata episode_id=\"$series_part\"") \
+                $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
+                $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
+                -progress - "$temp_output_file" 2>"$stderr_file" | \
+            grep --line-buffered -o "out_time_ms=[0-9]*" | grep --line-buffered -o "[0-9]*" | \
+            awk '{printf "%d\n", $1/1000000}' > "$progress_file"
+        fi
     ) &
     
     # Capture the FFmpeg process ID
@@ -1065,8 +1073,26 @@ EOF
             return
         fi
         
+        # Check for invalid data errors which often happen with problematic file paths
+        if grep -q "Invalid data found when processing input" "$stderr_file"; then
+            echo "ERROR: Invalid data found when processing input."
+            echo "This is likely due to special characters in file paths or corrupted input files."
+            echo "Try removing apostrophes, quotes or special characters from folder and file names."
+            echo "ERROR: Invalid data found when processing input" >> "$LOG_FILE"
+            echo "This is likely due to special characters in file paths or corrupted input files" >> "$LOG_FILE"
+            echo "Try removing apostrophes, quotes or special characters from folder and file names" >> "$LOG_FILE"
+            echo "Skipping this audiobook" >> "$LOG_FILE"
+            
+            # Log the input file list for debugging
+            echo "Input file list that caused the error:" >> "$LOG_FILE"
+            cat "$file_list" >> "$LOG_FILE"
+            
+            rm -rf "$temp_dir"
+            return
+        fi
+        
         # Log the stderr for debugging (but don't output to terminal to avoid line number confusion)
-        echo "FFmpeg stderr output saved to log file" | tee -a "$LOG_FILE"
+        echo "FFmpeg stderr output saved to log file" >> "$LOG_FILE"
         cat "$stderr_file" >> "$LOG_FILE"
     fi
     
