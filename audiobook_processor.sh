@@ -570,22 +570,24 @@ EOF
         echo "Searching for audio files in $book_name..." >> "$LOG_FILE"
         
         # Get list of audio files using find instead of fd for better compatibility
-        audio_files=$(find "$book_dir" -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.flac" -o -name "*.wav" -o -name "*.aac" \) | sort)
+        # Save file paths to a temp file to prevent command line splitting issues
+        find "$book_dir" -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.flac" -o -name "*.wav" -o -name "*.aac" \) | sort > "$temp_dir/audio_files_list.txt"
+        # Count total files
+        audio_file_count=$(wc -l < "$temp_dir/audio_files_list.txt")
         
         # Ensure we found audio files
-        if [ -z "$audio_files" ]; then
+        if [ "$audio_file_count" -eq 0 ]; then
             echo "Error: No audio files found in $book_dir" | tee -a "$LOG_FILE"
             echo "Skipping this directory" | tee -a "$LOG_FILE"
             rm -rf "$temp_dir"
             return
         fi
         
-        # Count files
-        file_count=$(echo "$audio_files" | wc -l)
-        echo "Found $file_count audio files" | tee -a "$LOG_FILE"
+        # Report file count
+        echo "Found $audio_file_count audio files" | tee -a "$LOG_FILE"
         
         # Extract metadata from first audio file if needed
-        first_file=$(echo "$audio_files" | head -n 1)
+        first_file=$(head -n 1 "$temp_dir/audio_files_list.txt")
         
         if command -v mediainfo &>/dev/null; then
             echo "Extracting metadata from audio files..." >> "$LOG_FILE"
@@ -726,9 +728,9 @@ EOF
         
         # Process each audio file
         i=0
-        for file in $audio_files; do
+        while IFS= read -r file; do
             i=$((i+1))
-            echo "[$i/$file_count] Processing $(basename "$file")" >> "$LOG_FILE"
+            echo "[$i/$audio_file_count] Processing $(basename "$file")" >> "$LOG_FILE"
             
             # Get duration of this file if possible
             if command -v mediainfo &>/dev/null; then
@@ -745,7 +747,7 @@ EOF
             # Add to file list with proper escaping
             # Make sure to properly quote the entire path
             printf "file '%s'\n" "$file" >> "$temp_dir/filelist.txt"
-        done
+        done < "$temp_dir/audio_files_list.txt"
         
         # Format the total duration
         if [ "$total_duration_seconds" -gt 0 ]; then
