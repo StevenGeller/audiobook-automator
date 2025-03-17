@@ -43,9 +43,26 @@ OUTPUT_DIR="$AUDIOBOOKS_DIR"
 # Initialize log file
 echo "Audiobook Processing Log - $(date)" > "$LOG_FILE"
 
-# Function to sanitize filenames
+# Function to sanitize filenames for cross-platform compatibility
 sanitize_filename() {
-    echo "$1" | sed 's/[^a-zA-Z0-9._-]/_/g'
+    # Replace problematic characters with underscores
+    # Keep alphanumeric, spaces, dots, hyphens, and underscores
+    # Convert spaces to spaces (we'll keep them for readability)
+    local sanitized
+    sanitized=$(echo "$1" | sed -e 's/[^a-zA-Z0-9 ._-]/_/g')
+    
+    # Remove leading and trailing spaces
+    sanitized=$(echo "$sanitized" | sed -e 's/^ *//' -e 's/ *$//')
+    
+    # Condense multiple spaces into a single space
+    sanitized=$(echo "$sanitized" | sed -e 's/  */ /g')
+    
+    # Ensure we have a valid filename by adding a default if empty
+    if [ -z "$sanitized" ]; then
+        sanitized="audiobook"
+    fi
+    
+    echo "$sanitized"
 }
 
 # Function to display progress bar
@@ -939,15 +956,31 @@ EOF
     # Step 4: Prepare for creating m4b file
     echo "Preparing m4b file creation..." | tee -a "$LOG_FILE"
     
-    # For in-place processing, keep the file in the same directory
+    # For in-place processing with a simple file structure
     local target_folder="$book_dir"
     
-    # Create a standardized filename based on metadata
-    local output_filename="${author} - ${title}"
-    if [ -n "$series" ] && [ -n "$series_part" ]; then
-        output_filename="${author} - ${series} ${series_part} - ${title}"
-    elif [ -n "$series" ]; then
-        output_filename="${author} - ${series} - ${title}"
+    # Create a simple standardized filename based on metadata
+    local output_filename=""
+    
+    # If we have author and title, create standardized filename
+    if [ -n "$author" ] && [ -n "$title" ]; then
+        # Start with author
+        output_filename="${author}"
+        
+        # Add series info if available
+        if [ -n "$series" ]; then
+            if [ -n "$series_part" ]; then
+                output_filename="${output_filename} - ${series} ${series_part}"
+            else
+                output_filename="${output_filename} - ${series}"
+            fi
+        fi
+        
+        # Add title
+        output_filename="${output_filename} - ${title}"
+    else
+        # Fallback to directory name if metadata is incomplete
+        output_filename="$book_name"
     fi
     
     # Sanitize the output filename
