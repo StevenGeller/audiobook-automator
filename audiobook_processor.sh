@@ -5,6 +5,8 @@
 # This script handles audiobook conversion with robust error handling
 # and clear progress indications even for complex file paths.
 #
+# Version: 1.2.0
+#
 # Bash strict mode for more reliable error detection
 # We'll enable these after variable initialization
 #set -o errexit    # Exit on error
@@ -16,6 +18,13 @@ if [[ "${DEBUG:-}" == "1" ]]; then
     set -o xtrace  # Print commands as they execute
 fi
 
+# Enable verbose mode if requested
+VERBOSE=false
+if [[ "${VERBOSE:-}" == "1" ]]; then
+    VERBOSE=true
+    echo "Verbose mode enabled"
+fi
+
 # Default behavior: remove original files after successful conversion
 KEEP_ORIGINAL_FILES=false
 
@@ -24,6 +33,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --keep-original-files)
             KEEP_ORIGINAL_FILES=true
+            shift
+            ;;
+        --verbose)
+            VERBOSE=true
+            export VERBOSE=1
+            echo "Verbose mode enabled"
             shift
             ;;
         *)
@@ -719,6 +734,7 @@ EOF
                 local status_msg=""
                 local file_processed=0
                 local total_files=$audio_file_count
+                local timeout_seconds=1800  # 30 minute timeout
                 
                 while [ ! -e "${progress_file}.done" ]; do
                     # Get current status
@@ -737,6 +753,13 @@ EOF
                     # Calculate elapsed time
                     current_time=$(date +%s)
                     elapsed=$((current_time - start_time))
+                    
+                    # Check for timeout
+                    if [ $elapsed -gt $timeout_seconds ]; then
+                        printf "\rProcessing... Timed out after %d seconds                                        \n" "$elapsed"
+                        touch "${progress_file}.done" 2>/dev/null  # Force completion
+                        break
+                    fi
                     
                     # Format elapsed time as HH:MM:SS
                     elapsed_formatted=$(printf "%02d:%02d:%02d" $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
@@ -876,21 +899,39 @@ EOF
         
         # Setup enhanced progress monitoring in background
         {
+            local timeout_seconds=1800  # 30 minute timeout
+            local start_monitor_time=$(date +%s)
+            
             while [ ! -e "${progress_file}.done" ]; do
+                # Check for timeout
+                current_time=$(date +%s)
+                elapsed=$((current_time - start_monitor_time))
+                if [ $elapsed -gt $timeout_seconds ]; then
+                    echo "Monitor timed out after $elapsed seconds" > "$temp_dir/status.txt"
+                    break
+                fi
+                
                 if [ -f "$stderr_file" ]; then
                     # Extract time and speed information from stderr for detailed progress
-                    if grep -q "time=" "$stderr_file"; then
-                        time_info=$(grep -o "time=[0-9:.]*" "$stderr_file" | tail -n 1 | cut -d= -f2)
-                        speed_info=$(grep -o "speed=[0-9.]*x" "$stderr_file" | tail -n 1 | cut -d= -f2)
+                    if grep -q "time=" "$stderr_file" 2>/dev/null; then
+                        time_info=$(grep -o "time=[0-9:.]*" "$stderr_file" 2>/dev/null | tail -n 1 | cut -d= -f2)
+                        speed_info=$(grep -o "speed=[0-9.]*x" "$stderr_file" 2>/dev/null | tail -n 1 | cut -d= -f2)
                         
-                        # Display progress with percentage if total duration is known
-                        if [ "$total_duration_seconds" -gt 0 ]; then
-                            # Convert HH:MM:SS.MS to seconds
-                            current_seconds=$(echo "$time_info" | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }')
-                            progress_percent=$(( (current_seconds * 100) / total_duration_seconds ))
-                            echo "Converting: $time_info / ~$formatted_duration ($progress_percent% at $speed_info)" > "$temp_dir/status.txt"
-                        else
-                            echo "Converting: $time_info elapsed ($speed_info)" > "$temp_dir/status.txt"
+                        # Make sure we got valid time info before continuing
+                        if [ -n "$time_info" ]; then
+                            # Display progress with percentage if total duration is known
+                            if [ "$total_duration_seconds" -gt 0 ]; then
+                                # Convert HH:MM:SS.MS to seconds (safely)
+                                current_seconds=$(echo "$time_info" | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }' 2>/dev/null || echo "0")
+                                if [ -n "$current_seconds" ] && [ "$current_seconds" -gt 0 ]; then
+                                    progress_percent=$(( (current_seconds * 100) / total_duration_seconds ))
+                                    echo "Converting: $time_info / ~$formatted_duration ($progress_percent% at $speed_info)" > "$temp_dir/status.txt"
+                                else
+                                    echo "Converting: $time_info elapsed ($speed_info)" > "$temp_dir/status.txt"
+                                fi
+                            else
+                                echo "Converting: $time_info elapsed ($speed_info)" > "$temp_dir/status.txt"
+                            fi
                         fi
                     fi
                 fi
@@ -900,11 +941,32 @@ EOF
         progress_monitor_pid=$!
         
         # Try the primary approach with array (most reliable)
-        ffmpeg "${ffmpeg_args[@]}" 2>"$stderr_file"
+        # Start a watchdog timer in the background to kill ffmpeg if it takes too long
+        {
+            sleep 600  # 10 minute timeout
+            if [ -n "$ffmpeg_pid" ] && ps -p "$ffmpeg_pid" > /dev/null; then
+                echo "Ffmpeg process taking too long, killing it..." >> "$LOG_FILE"
+                kill "$ffmpeg_pid" 2>/dev/null || true
+            fi
+        } &
+        watchdog_pid=$!
+        
+        # Run ffmpeg and capture its PID
+        ffmpeg "${ffmpeg_args[@]}" 2>"$stderr_file" &
+        ffmpeg_pid=$!
+        wait "$ffmpeg_pid"
         ffmpeg_result=$?
         
+        # Kill the watchdog timer
+        if [ -n "$watchdog_pid" ]; then
+            kill "$watchdog_pid" 2>/dev/null || true
+        fi
+        
         # Kill progress monitor when done
-        kill $progress_monitor_pid 2>/dev/null || true
+        if [ -n "$progress_monitor_pid" ]; then
+            kill $progress_monitor_pid 2>/dev/null || true
+            wait $progress_monitor_pid 2>/dev/null || true
+        fi
         
         # If the primary approach fails, try a more direct approach
         if [ $ffmpeg_result -ne 0 ]; then
@@ -985,20 +1047,33 @@ EOF
             
             # Setup enhanced progress monitoring for fallback
             {
+                local timeout_seconds=1800  # 30 minute timeout
+                local start_monitor_time=$(date +%s)
+                
                 while [ ! -e "${progress_file}.done" ]; do
+                    # Check for timeout
+                    current_time=$(date +%s)
+                    elapsed=$((current_time - start_monitor_time))
+                    if [ $elapsed -gt $timeout_seconds ]; then
+                        echo "Fallback monitor timed out after $elapsed seconds" > "$temp_dir/status.txt"
+                        break
+                    fi
+                    
                     if [ -f "$stderr_file" ]; then
                         # Extract time and speed information from stderr for detailed progress
-                        if grep -q "time=" "$stderr_file"; then
-                            time_info=$(grep -o "time=[0-9:.]*" "$stderr_file" | tail -n 1 | cut -d= -f2)
-                            speed_info=$(grep -o "speed=[0-9.]*x" "$stderr_file" | tail -n 1 | cut -d= -f2)
+                        if grep -q "time=" "$stderr_file" 2>/dev/null; then
+                            time_info=$(grep -o "time=[0-9:.]*" "$stderr_file" 2>/dev/null | tail -n 1 | cut -d= -f2)
+                            speed_info=$(grep -o "speed=[0-9.]*x" "$stderr_file" 2>/dev/null | tail -n 1 | cut -d= -f2)
                             
                             # Get file count for context
-                            current_file=$(grep -o "video:[0-9]*" "$stderr_file" | tail -n 1 | cut -d: -f2)
+                            current_file=$(grep -o "video:[0-9]*" "$stderr_file" 2>/dev/null | tail -n 1 | cut -d: -f2)
                             
-                            if [ -n "$speed_info" ]; then
-                                echo "Fallback converting: $time_info elapsed ($speed_info)" > "$temp_dir/status.txt"
-                            else
-                                echo "Fallback converting: $time_info elapsed" > "$temp_dir/status.txt"
+                            if [ -n "$time_info" ]; then
+                                if [ -n "$speed_info" ]; then
+                                    echo "Fallback converting: $time_info elapsed ($speed_info)" > "$temp_dir/status.txt"
+                                else
+                                    echo "Fallback converting: $time_info elapsed" > "$temp_dir/status.txt"
+                                fi
                             fi
                         fi
                     fi
@@ -1007,12 +1082,33 @@ EOF
             } &
             fallback_monitor_pid=$!
             
-            # Execute the fallback approach
-            ffmpeg "${fallback_args[@]}" 2>>"$stderr_file"
+            # Execute the fallback approach with timeout
+            # Start a watchdog timer in the background to kill ffmpeg if it takes too long
+            {
+                sleep 600  # 10 minute timeout
+                if [ -n "$fallback_ffmpeg_pid" ] && ps -p "$fallback_ffmpeg_pid" > /dev/null; then
+                    echo "Fallback ffmpeg process taking too long, killing it..." >> "$LOG_FILE"
+                    kill "$fallback_ffmpeg_pid" 2>/dev/null || true
+                fi
+            } &
+            fallback_watchdog_pid=$!
+            
+            # Run ffmpeg and capture its PID
+            ffmpeg "${fallback_args[@]}" 2>>"$stderr_file" &
+            fallback_ffmpeg_pid=$!
+            wait "$fallback_ffmpeg_pid"
             ffmpeg_result=$?
             
+            # Kill the watchdog timer
+            if [ -n "$fallback_watchdog_pid" ]; then
+                kill "$fallback_watchdog_pid" 2>/dev/null || true
+            fi
+            
             # Kill progress monitor
-            kill $fallback_monitor_pid 2>/dev/null || true
+            if [ -n "$fallback_monitor_pid" ]; then
+                kill $fallback_monitor_pid 2>/dev/null || true
+                wait $fallback_monitor_pid 2>/dev/null || true
+            fi
                   
             # Update result
             ffmpeg_result=$?
@@ -1090,12 +1186,25 @@ EOF
         
         # Final result already stored in ffmpeg_result variable
         
-        # Signal progress indicator to stop
-        touch "${progress_file}.done" 2>/dev/null
+        # Signal progress indicator to stop - retry a few times if needed
+        for i in {1..5}; do
+            if touch "${progress_file}.done" 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+        
+        # Make extra sure the .done file exists
+        if [ ! -e "${progress_file}.done" ]; then
+            # Try creating in parent directory as fallback
+            touch "$(dirname "$progress_file").done" 2>/dev/null || echo "Warning: Could not create .done file" >> "$LOG_FILE"
+        fi
         
         # Wait for progress indicator to exit
-        wait $progress_pid 2>/dev/null
-        progress_pid=""
+        if [ -n "$progress_pid" ]; then
+            wait $progress_pid 2>/dev/null || true
+            progress_pid=""
+        fi
         
         # Check ffmpeg result
         if [ $ffmpeg_result -ne 0 ]; then
@@ -1115,11 +1224,28 @@ EOF
                 echo "ERROR: Some files or directories could not be accessed. This may be due to special characters in filenames." | tee -a "$LOG_FILE"
             elif grep -q "Invalid data found when processing input" "$stderr_file" 2>/dev/null; then
                 echo "ERROR: Some audio files may be corrupted or in an unsupported format." | tee -a "$LOG_FILE"
+            elif grep -q "Killed" "$stderr_file" 2>/dev/null; then
+                echo "ERROR: ffmpeg process was killed due to timeout or system constraints." | tee -a "$LOG_FILE"
+            elif grep -q "Error" "$stderr_file" 2>/dev/null; then
+                echo "ERROR: General ffmpeg error detected. See log for details." | tee -a "$LOG_FILE"
             fi
+            
+            # Try to create an empty output file so we can continue processing
+            # This prevents hanging in case of ffmpeg failure
+            echo "Creating empty placeholder file to continue processing..." >> "$LOG_FILE"
+            touch "$temp_output_file" 2>/dev/null
             
             echo "RECOMMENDATION: Try processing this audiobook manually or rename the files to remove special characters." | tee -a "$LOG_FILE"
             echo "Skipping this audiobook" | tee -a "$LOG_FILE"
-            rm -rf "$temp_dir"
+            
+            # Ensure we clean up and continue
+            if [ -d "$temp_dir" ]; then
+                echo "Cleaning up temporary directory..." >> "$LOG_FILE"
+                rm -rf "$temp_dir" 2>/dev/null || {
+                    find "$temp_dir" -type f -exec rm -f {} \; 2>/dev/null
+                    rmdir "$temp_dir" 2>/dev/null
+                }
+            fi
             return
         fi
     fi

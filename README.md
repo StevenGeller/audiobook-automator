@@ -106,6 +106,40 @@ process a directory containing multiple audiobooks:
 ./audiobook_processor.sh /path/to/audiobooks
 ```
 
+### command-line options
+
+```bash
+./audiobook_processor.sh [options] /path/to/audiobooks
+
+Options:
+  --keep-original-files     Don't delete original audio files after successful conversion
+  --verbose                 Display detailed processing information
+```
+
+### testing with complex paths
+
+For testing with complex file paths, special characters, and nested directories:
+
+```bash
+# Create test files with complex paths
+./test_complex_paths.sh
+
+# Process test files with verbose output
+./audiobook_processor.sh --verbose --keep-original-files ./test_audiobooks
+
+# Validate created m4b files
+./validate_output.sh ./test_audiobooks/processed
+```
+
+### preprocessing file names
+
+Sanitize filenames before processing:
+
+```bash
+./organize_filenames.sh /path/to/audiobooks
+./audiobook_processor.sh /path/to/audiobooks
+```
+
 ### specifying output directory
 
 by default, processed audiobooks are saved to a `processed` subdirectory in the input folder. you can specify a different output directory:
@@ -204,6 +238,12 @@ the script can extract metadata from various filename formats:
 
 **issue**: the script removes original files and things go wrong  
 **solution**: use the `--keep-original-files` flag to preserve original files after processing. This is recommended for first-time users until you're confident the script works correctly.
+
+**issue**: processing gets stuck with complex file paths or special characters  
+**solution**: use the `organize_filenames.sh` script first to sanitize filenames, or run the main script with the `--verbose` flag for detailed progress information to identify problematic files. The latest version includes built-in timeouts to prevent indefinite hanging during ffmpeg conversion.
+
+**issue**: need to verify the output file integrity  
+**solution**: run the `validate_output.sh` script on your processed files to verify they are valid m4b files with proper metadata.
 
 ## contributing
 
