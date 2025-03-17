@@ -1146,13 +1146,25 @@ EOF
     echo "DEBUG: Progress file: $progress_file" >> "$LOG_FILE"
     echo "DEBUG: Temp output file: $temp_output_file" >> "$LOG_FILE"
     
-    # Use a more compatible progress indicator approach
+    # Use a simpler progress indicator approach with better error handling
     progress_indicator() {
         local spinner=('-' '\\' '|' '/')
         local sc=0
         local start_time=$(date +%s)
         
-        while [ ! -f "${progress_file}.done" ]; do
+        # Create a trap to handle signals
+        trap 'exit 0' TERM INT
+        
+        # Loop until done file exists or we get 10 minutes without progress
+        local last_size=0
+        local stalled_count=0
+        while true; do
+            # Exit if processing is done
+            if [ -f "${progress_file}.done" ]; then
+                break
+            fi
+            
+            # Calculate elapsed time
             elapsed=$(($(date +%s) - start_time))
             printf "\rWorking [%s] %02d:%02d elapsed" "${spinner[$sc]}" $((elapsed/60)) $((elapsed%60))
             
@@ -1161,9 +1173,22 @@ EOF
                 # Use a more compatible approach to get file size
                 local size_kb=$(du -k "$temp_output_file" 2>/dev/null | cut -f1)
                 if [ -n "$size_kb" ]; then
+                    if [ "$size_kb" -eq "$last_size" ]; then
+                        stalled_count=$((stalled_count + 1))
+                    else
+                        stalled_count=0
+                        last_size=$size_kb
+                    fi
+                    
                     local size_mb=$(echo "scale=1; $size_kb/1024" | bc 2>/dev/null || echo "0")
                     printf " (%.1f MB)" "$size_mb"
                 fi
+            fi
+            
+            # Exit if we've been stalled for too long (10 minutes)
+            if [ $stalled_count -gt 600 ]; then
+                printf "\rProcessing stalled, may be finished or hung...                   \n"
+                break
             fi
             
             sc=$(( (sc+1) % 4 ))
@@ -1171,6 +1196,9 @@ EOF
         done
         printf "\rConversion complete!                                    \n"
     }
+    
+    # Create the done file if it doesn't exist yet
+    rm -f "${progress_file}.done" 2>/dev/null
     
     # Start the progress indicator in the background
     progress_indicator &
@@ -1180,10 +1208,21 @@ EOF
     
     # Cleanup function to ensure we always kill the progress indicator
     cleanup_progress() {
-        kill $progress_pid 2>/dev/null || true
+        # Signal the indicator to stop
+        touch "${progress_file}.done" 2>/dev/null
+        
+        # Wait a bit and then kill it if still running
+        sleep 1
+        if ps -p $progress_pid > /dev/null 2>&1; then
+            kill -TERM $progress_pid 2>/dev/null || true
+        fi
+        
         # Clear the line
         printf "\r\033[K"
     }
+    
+    # Set a trap for script termination
+    trap cleanup_progress EXIT
     
     # Run ffmpeg directly with simpler progress handling
     set +e  # Disable exit on error temporarily
@@ -1208,12 +1247,11 @@ EOF
         $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
         "$temp_output_file" 2>"$stderr_file"
     
-    # Save the result and mark completion
+    # Save the result
     local ffmpeg_result=$?
-    touch "${progress_file}.done"
     
-    # Kill the progress indicator and clean up
-    cleanup_progress
+    # Signal completion to the progress indicator
+    touch "${progress_file}.done" 2>/dev/null
     
     set -e  # Re-enable exit on error
     
