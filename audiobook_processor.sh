@@ -189,6 +189,12 @@ process_audiobook() {
             find "$temp_dir" -depth -type d -exec rmdir {} \; 2>/dev/null
             rm -rf "$temp_dir" 2>/dev/null
         fi
+        
+        # If still exists after cleanup attempts, use a unique temp dir
+        if [ -d "$temp_dir" ]; then
+            echo "Warning: Could not clean up temp directory, creating unique one instead..." >> "$LOG_FILE"
+            temp_dir="${temp_dir}_$(date +%s)"
+        fi
     fi
     
     # Create the temp directory
@@ -1296,9 +1302,20 @@ declare -a processed_books
 # Function to check if a directory has already been processed
 is_book_processed() {
     local check_dir="$1"
+    local check_dir_canonical=$(cd "$check_dir" 2>/dev/null && pwd -P)
+    
+    # If we can't get canonical path, use original
+    if [ -z "$check_dir_canonical" ]; then
+        check_dir_canonical="$check_dir"
+    fi
     
     for dir in "${processed_books[@]}"; do
-        if [ "$dir" = "$check_dir" ]; then
+        local dir_canonical=$(cd "$dir" 2>/dev/null && pwd -P)
+        if [ -z "$dir_canonical" ]; then
+            dir_canonical="$dir"
+        fi
+        
+        if [ "$dir_canonical" = "$check_dir_canonical" ]; then
             return 0 # Already processed
         fi
     done
@@ -1324,16 +1341,34 @@ process_directory() {
     echo "${indent}Checking directory: $dir_name" >> "$LOG_FILE"
     
     # Check if directory contains audio files using a more robust approach
+    local has_audio_files=false
     if fd -e mp3 -e m4a -e flac -e wav -e aac . "$dir" --max-depth 1 | grep -q .; then
+        has_audio_files=true
+    fi
+    
+    # Check if directory already has an m4b file
+    local has_m4b_files=false
+    if find "$dir" -maxdepth 1 -name "*.m4b" | grep -q .; then
+        has_m4b_files=true
+    fi
+    
+    if [ "$has_audio_files" = true ]; then
         # Only print to console if we actually found audio files to process
         echo "Found audiobook: $dir_name"
         echo "${indent}Found audio files in $dir_name" >> "$LOG_FILE"
         
-        # Add to processed list (before processing, to prevent reprocessing if something goes wrong)
-        processed_books+=("$dir")
-        
-        # Process the audiobook
-        process_audiobook "$dir"
+        # Check if we already have an m4b file and no source files
+        if [ "$has_m4b_files" = true ] && [ "$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$dir" --max-depth 1 | wc -l)" -le 2 ]; then
+            echo "${indent}Directory already contains m4b file and few source files, likely already processed" >> "$LOG_FILE"
+            # Still mark as processed to avoid reprocessing
+            processed_books+=("$dir")
+        else
+            # Add to processed list (before processing, to prevent reprocessing if something goes wrong)
+            processed_books+=("$dir")
+            
+            # Process the audiobook
+            process_audiobook "$dir"
+        fi
     fi
     
     # Always check subdirectories regardless of whether we processed this directory or not

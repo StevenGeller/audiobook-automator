@@ -187,14 +187,23 @@ the script can extract metadata from various filename formats:
 
 ### common issues
 
-**issue**: script reports "command not found: fd"
+**issue**: script reports "command not found: fd"  
 **solution**: on debian/ubuntu systems, fd is called fd-find. the installation script creates an alias, but you may need to restart your terminal or run `source ~/.bashrc`.
 
-**issue**: no audio files found
+**issue**: no audio files found  
 **solution**: ensure your audio files are in supported formats (mp3, m4a, flac, wav, aac) and the script has permission to access the directory.
 
-**issue**: online metadata lookup fails
+**issue**: online metadata lookup fails  
 **solution**: check your internet connection. the script will still work with local metadata if online lookup fails.
+
+**issue**: the script processes the same audiobook more than once  
+**solution**: this issue has been fixed in the latest version. The script now uses canonical paths to track processed directories and better detects already processed books.
+
+**issue**: the script fails when processing multiple audiobooks  
+**solution**: the latest version includes improved temp directory handling to prevent conflicts between processing runs.
+
+**issue**: the script removes original files and things go wrong  
+**solution**: use the `--keep-original-files` flag to preserve original files after processing. This is recommended for first-time users until you're confident the script works correctly.
 
 ## contributing
 
