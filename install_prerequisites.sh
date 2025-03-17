@@ -182,12 +182,15 @@ verify_installations() {
     done
     
     # check for Python packages
-    local packages=("requests" "beautifulsoup4" "fuzzywuzzy")
-    for pkg in "${packages[@]}"; do
+    local packages=("requests" "bs4" "fuzzywuzzy")
+    local package_names=("requests" "beautifulsoup4" "fuzzywuzzy")
+    for i in "${!packages[@]}"; do
+        pkg=${packages[$i]}
+        pkg_name=${package_names[$i]}
         if python3 -c "import $pkg" &> /dev/null; then
-            echo -e "${GREEN}✓ Python package $pkg is installed${NC}"
+            echo -e "${GREEN}✓ Python package $pkg_name is installed${NC}"
         else
-            echo -e "${RED}✗ Python package $pkg is not installed${NC}"
+            echo -e "${RED}✗ Python package $pkg_name is not installed${NC}"
             missing=1
         fi
     done
