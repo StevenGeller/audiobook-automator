@@ -978,57 +978,34 @@ EOF
     # Step 5: Create m4b file with metadata, chapters, and cover art
     echo "Creating m4b file..." | tee -a "$LOG_FILE"
     
-    # Prepare ffmpeg command (with -y to force overwrite and -nostdin for non-interactive mode)
-    local ffmpeg_cmd="ffmpeg -y -nostdin -f concat -safe 0 -i \"$file_list\" -i \"$chapters_file\""
-    
-    # Add cover art if available
+    # Log if we will be adding cover art
     if [ -n "$cover_art" ] && [ -f "$cover_art" ]; then
         echo "Adding cover art from: $cover_art" | tee -a "$LOG_FILE"
-        ffmpeg_cmd="$ffmpeg_cmd -i \"$cover_art\""
-        # Map audio and cover art
-        ffmpeg_cmd="$ffmpeg_cmd -map_metadata 1 -map 0:a -map 2:v"
-        # Set cover art as poster
-        ffmpeg_cmd="$ffmpeg_cmd -disposition:v:0 attached_pic"
     else
-        # No cover art, just map audio
-        ffmpeg_cmd="$ffmpeg_cmd -map_metadata 1 -map 0:a"
+        echo "No cover art will be added" | tee -a "$LOG_FILE"
     fi
     
-    # Add all metadata
-    ffmpeg_cmd="$ffmpeg_cmd -c:a aac -b:a 64k -movflags +faststart"
-    ffmpeg_cmd="$ffmpeg_cmd -metadata title=\"$title\""
-    ffmpeg_cmd="$ffmpeg_cmd -metadata artist=\"$author\""
-    ffmpeg_cmd="$ffmpeg_cmd -metadata album=\"$title\""
-    ffmpeg_cmd="$ffmpeg_cmd -metadata genre=\"$genre\""
-    
-    # Add additional metadata if available
-    if [ -n "$narrator" ]; then
-        ffmpeg_cmd="$ffmpeg_cmd -metadata composer=\"$narrator\""
-        ffmpeg_cmd="$ffmpeg_cmd -metadata comment=\"Narrator: $narrator\""
+    # Log metadata that will be used
+    echo "Using metadata:" | tee -a "$LOG_FILE"
+    echo "- Title: $title" | tee -a "$LOG_FILE"
+    echo "- Author: $author" | tee -a "$LOG_FILE"
+    echo "- Genre: $genre" | tee -a "$LOG_FILE"
+    if [ -n "$narrator" ]; then echo "- Narrator: $narrator" | tee -a "$LOG_FILE"; fi
+    if [ -n "$series" ]; then 
+        echo "- Series: $series" | tee -a "$LOG_FILE"
+        if [ -n "$series_part" ]; then echo "- Series Part: $series_part" | tee -a "$LOG_FILE"; fi
     fi
+    if [ -n "$year" ]; then echo "- Year: $year" | tee -a "$LOG_FILE"; fi
     
-    if [ -n "$series" ]; then
-        ffmpeg_cmd="$ffmpeg_cmd -metadata show=\"$series\""
-        
-        if [ -n "$series_part" ]; then
-            ffmpeg_cmd="$ffmpeg_cmd -metadata episode_id=\"$series_part\""
-        fi
-    fi
-    
-    if [ -n "$year" ]; then
-        ffmpeg_cmd="$ffmpeg_cmd -metadata date=\"$year\""
-    fi
-    
+    # Truncate description if too long
     if [ -n "$description" ]; then
-        # Truncate description if too long
         if [ ${#description} -gt 255 ]; then
             description="${description:0:252}..."
         fi
-        ffmpeg_cmd="$ffmpeg_cmd -metadata description=\"$description\""
+        echo "- Description: (truncated to 255 chars)" | tee -a "$LOG_FILE"
     fi
     
-    # Add output file
-    ffmpeg_cmd="$ffmpeg_cmd \"$output_file\""
+    # We're going to run ffmpeg directly instead of building a command string
     
     # Execute the command
     echo "Running ffmpeg command..." | tee -a "$LOG_FILE"
@@ -1045,7 +1022,25 @@ EOF
     set +e  # Disable exit on error temporarily
     # Redirect stderr to a file for analysis
     local stderr_file="$temp_dir/ffmpeg_stderr.log"
-    eval "$ffmpeg_cmd 2>$stderr_file"
+    # Create a debug log file
+    touch "$temp_dir/ffmpeg_debug.log"
+    # Run ffmpeg directly without using eval to avoid issues with line numbers
+    ffmpeg -y -nostdin -f concat -safe 0 -i "$file_list" -i "$chapters_file" \
+        $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-i $cover_art") \
+        -map_metadata 1 \
+        $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-map 0:a -map 2:v -disposition:v:0 attached_pic" || echo "-map 0:a") \
+        -c:a aac -b:a 64k -movflags +faststart \
+        -metadata title="$title" \
+        -metadata artist="$author" \
+        -metadata album="$title" \
+        -metadata genre="$genre" \
+        $([[ -n "$narrator" ]] && echo "-metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\"") \
+        $([[ -n "$series" ]] && echo "-metadata show=\"$series\"") \
+        $([[ -n "$series" && -n "$series_part" ]] && echo "-metadata episode_id=\"$series_part\"") \
+        $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
+        $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
+        "$output_file" 2>"$stderr_file"
+        
     local ffmpeg_result=$?
     set -e  # Re-enable exit on error
     
@@ -1060,9 +1055,9 @@ EOF
             return
         fi
         
-        # Log the stderr for debugging
-        echo "FFmpeg stderr output:" | tee -a "$LOG_FILE"
-        cat "$stderr_file" | tee -a "$LOG_FILE"
+        # Log the stderr for debugging (but don't output to terminal to avoid line number confusion)
+        echo "FFmpeg stderr output saved to log file" | tee -a "$LOG_FILE"
+        cat "$stderr_file" >> "$LOG_FILE"
     fi
     
     # Check if the command was successful
