@@ -1018,7 +1018,8 @@ EOF
     
     # Execute the command
     echo "Converting to m4b format..."
-    echo "Running ffmpeg command..." >> "$LOG_FILE"
+    # This text won't be displayed to terminal, only in log
+    echo "Running ffmpeg command in background..." >> "$LOG_FILE"
     
     # Check if the output directory is writable
     if [ ! -w "$(dirname "$output_file")" ]; then
@@ -1063,34 +1064,46 @@ EOF
     
     # Show that we're working
     echo "Converting audio files to m4b format (this may take a while)..."
+    echo "ffmpeg conversion running... (spinner will show progress)"
     
-    # Start a background progress indicator while we run ffmpeg
-    (
-        # Simple progress indicator
-        local chars="-\|/"
-        local i=0
-        local timeElapsed=0
+    # Clear the console buffer before showing the spinner
+    printf "\033c"
+    
+    # Create a simpler progress file
+    echo "0" > "$progress_file"
+    
+    # Debug info for troubleshooting
+    echo "DEBUG: Progress file: $progress_file" >> "$LOG_FILE"
+    echo "DEBUG: Temp output file: $temp_output_file" >> "$LOG_FILE"
+    
+    # Use a more compatible progress indicator approach
+    progress_indicator() {
+        local spinner=('-' '\\' '|' '/')
+        local sc=0
+        local start_time=$(date +%s)
         
-        # While ffmpeg is running, show a spinner
-        while true; do
-            # Show a dynamic message with elapsed time
-            printf "\r\033[KWorking [%c] %02dm:%02ds elapsed... " "${chars:$i:1}" $((timeElapsed/60)) $((timeElapsed%60))
-            i=$(( (i+1) % 4 ))
-            sleep 1
-            timeElapsed=$((timeElapsed+1))
+        while [ ! -f "${progress_file}.done" ]; do
+            elapsed=$(($(date +%s) - start_time))
+            printf "\rWorking [%s] %02d:%02d elapsed" "${spinner[$sc]}" $((elapsed/60)) $((elapsed%60))
             
-            # Check if the temp output file exists and is growing
+            # Show file size if it exists
             if [ -f "$temp_output_file" ]; then
-                local filesize=$(stat -f%z "$temp_output_file" 2>/dev/null || echo "0")
-                printf "(%s MB)" $(echo "scale=1; $filesize/1048576" | bc 2>/dev/null || echo "0")
+                # Use a more compatible approach to get file size
+                local size_kb=$(du -k "$temp_output_file" 2>/dev/null | cut -f1)
+                if [ -n "$size_kb" ]; then
+                    local size_mb=$(echo "scale=1; $size_kb/1024" | bc 2>/dev/null || echo "0")
+                    printf " (%.1f MB)" "$size_mb"
+                fi
             fi
             
-            # Check if the marker file exists signaling that ffmpeg is done
-            if [ -f "${progress_file}.done" ]; then
-                break
-            fi
+            sc=$(( (sc+1) % 4 ))
+            sleep 1
         done
-    ) &
+        printf "\rConversion complete!                                    \n"
+    }
+    
+    # Start the progress indicator in the background
+    progress_indicator &
     
     # Save progress indicator PID
     local progress_pid=$!
