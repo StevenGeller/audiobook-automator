@@ -155,9 +155,9 @@ process_audiobook() {
     local book_dir="$1"
     local book_name=$(basename "$book_dir")
     
-    # Show book number out of total in array
-    local book_count=${#processed_books[@]}
-    echo "Processing audiobook $book_count: $book_name"
+    # Show book number (starting from 0) 
+    # Use a fixed index that doesn't depend on the array size
+    echo "Processing audiobook $(get_processed_count): $book_name"
     
     # Check if we've already processed this book
     if is_book_processed "$book_dir"; then
@@ -941,23 +941,95 @@ EOF
         progress_monitor_pid=$!
         
         # Try the primary approach with array (most reliable)
-        # Start a watchdog timer in the background to kill ffmpeg if it takes too long
-        {
-            sleep 600  # 10 minute timeout
-            if [ -n "$ffmpeg_pid" ] && ps -p "$ffmpeg_pid" > /dev/null; then
-                echo "Ffmpeg process taking too long, killing it..." >> "$LOG_FILE"
-                kill "$ffmpeg_pid" 2>/dev/null || true
+        # We'''ll set up a more aggressive timeout that doesn'''t rely on background processes
+        ffmpeg_timeout=900  # 15 minute timeout
+        
+        # Use timeout command if available, otherwise use a background watchdog
+        if command -v timeout &>/dev/null; then
+            # Use the timeout command which is more reliable
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                # On macOS, we need to use gtimeout from coreutils
+                if command -v gtimeout &>/dev/null; then
+                    echo "Using gtimeout for ffmpeg..." >> "$LOG_FILE"
+                    gtimeout $ffmpeg_timeout ffmpeg "${ffmpeg_args[@]}" 2>"$stderr_file"
+                    ffmpeg_result=$?
+                else
+                    # Fallback for macOS without gtimeout
+                    echo "Starting ffmpeg with manual timeout..." >> "$LOG_FILE"
+                    (
+                        # Start ffmpeg in background
+                        ffmpeg "${ffmpeg_args[@]}" 2>"$stderr_file" &
+                        ffmpeg_pid=$!
+                        
+                        # Wait for specified time then kill if still running
+                        sleep $ffmpeg_timeout
+                        if ps -p $ffmpeg_pid > /dev/null 2>&1; then
+                            echo "Killing ffmpeg process after timeout..." >> "$LOG_FILE"
+                            kill -9 $ffmpeg_pid > /dev/null 2>&1
+                        fi
+                    ) &
+                    watchdog_pid=$!
+                    
+                    # Run ffmpeg and wait for it
+                    ffmpeg "${ffmpeg_args[@]}" 2>"$stderr_file"
+                    ffmpeg_result=$?
+                    
+                    # Kill watchdog if still running
+                    if [ -n "$watchdog_pid" ]; then
+                        kill $watchdog_pid > /dev/null 2>&1 || true
+                    fi
+                fi
+            else
+                # On Linux, use timeout directly
+                echo "Using timeout for ffmpeg..." >> "$LOG_FILE"
+                timeout $ffmpeg_timeout ffmpeg "${ffmpeg_args[@]}" 2>"$stderr_file"
+                ffmpeg_result=$?
             fi
-        } &
-        watchdog_pid=$!
-        
-        # Run ffmpeg and capture its PID
-        ffmpeg "${ffmpeg_args[@]}" 2>"$stderr_file" &
-        ffmpeg_pid=$!
-        wait "$ffmpeg_pid"
-        ffmpeg_result=$?
-        
-        # Kill the watchdog timer
+        else
+            # Fallback method using background process and kill
+            echo "Starting ffmpeg with manual timeout..." >> "$LOG_FILE"
+            
+            # Start ffmpeg and capture PID
+            ffmpeg "${ffmpeg_args[@]}" 2>"$stderr_file" &
+            ffmpeg_pid=$!
+            
+            # Start a watchdog in the background
+            {
+                # Wait for completion with timeout
+                for ((i=1; i<=$ffmpeg_timeout; i++)); do
+                    # Check if process is still running
+                    if ! ps -p $ffmpeg_pid > /dev/null 2>&1; then
+                        break  # Process finished
+                    fi
+                    
+                    # Print progress every 60 seconds
+                    if ((i % 60 == 0)); then
+                        echo "ffmpeg running for $i seconds..." >> "$LOG_FILE"
+                    fi
+                    
+                    # Sleep briefly
+                    sleep 1
+                done
+                
+                # Kill if still running after timeout
+                if ps -p $ffmpeg_pid > /dev/null 2>&1; then
+                    echo "Killing ffmpeg process after $ffmpeg_timeout second timeout..." >> "$LOG_FILE"
+                    kill -9 $ffmpeg_pid > /dev/null 2>&1
+                    # Also signal that we'''re done to the progress monitor
+                    touch "${progress_file}.done" 2>/dev/null || true
+                fi
+            } &
+            watchdog_pid=$!
+            
+            # Wait for ffmpeg to complete
+            wait $ffmpeg_pid
+            ffmpeg_result=$?
+            
+            # Kill the watchdog
+            if [ -n "$watchdog_pid" ]; then
+                kill $watchdog_pid > /dev/null 2>&1 || true
+            fi
+        }
         if [ -n "$watchdog_pid" ]; then
             kill "$watchdog_pid" 2>/dev/null || true
         fi
@@ -1083,23 +1155,94 @@ EOF
             fallback_monitor_pid=$!
             
             # Execute the fallback approach with timeout
-            # Start a watchdog timer in the background to kill ffmpeg if it takes too long
-            {
-                sleep 600  # 10 minute timeout
-                if [ -n "$fallback_ffmpeg_pid" ] && ps -p "$fallback_ffmpeg_pid" > /dev/null; then
-                    echo "Fallback ffmpeg process taking too long, killing it..." >> "$LOG_FILE"
-                    kill "$fallback_ffmpeg_pid" 2>/dev/null || true
+            ffmpeg_timeout=900  # 15 minute timeout
+            
+            # Use timeout command if available, otherwise use a background watchdog
+            if command -v timeout &>/dev/null; then
+                # Use the timeout command which is more reliable
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    # On macOS, we need to use gtimeout from coreutils
+                    if command -v gtimeout &>/dev/null; then
+                        echo "Using gtimeout for fallback ffmpeg..." >> "$LOG_FILE"
+                        gtimeout $ffmpeg_timeout ffmpeg "${fallback_args[@]}" 2>>"$stderr_file"
+                        ffmpeg_result=$?
+                    else
+                        # Fallback for macOS without gtimeout
+                        echo "Starting fallback ffmpeg with manual timeout..." >> "$LOG_FILE"
+                        (
+                            # Start ffmpeg in background
+                            ffmpeg "${fallback_args[@]}" 2>>"$stderr_file" &
+                            fallback_ffmpeg_pid=$!
+                            
+                            # Wait for specified time then kill if still running
+                            sleep $ffmpeg_timeout
+                            if ps -p $fallback_ffmpeg_pid > /dev/null 2>&1; then
+                                echo "Killing fallback ffmpeg process after timeout..." >> "$LOG_FILE"
+                                kill -9 $fallback_ffmpeg_pid > /dev/null 2>&1
+                            fi
+                        ) &
+                        fallback_watchdog_pid=$!
+                        
+                        # Run ffmpeg and wait for it
+                        ffmpeg "${fallback_args[@]}" 2>>"$stderr_file"
+                        ffmpeg_result=$?
+                        
+                        # Kill watchdog if still running
+                        if [ -n "$fallback_watchdog_pid" ]; then
+                            kill $fallback_watchdog_pid > /dev/null 2>&1 || true
+                        fi
+                    fi
+                else
+                    # On Linux, use timeout directly
+                    echo "Using timeout for fallback ffmpeg..." >> "$LOG_FILE"
+                    timeout $ffmpeg_timeout ffmpeg "${fallback_args[@]}" 2>>"$stderr_file"
+                    ffmpeg_result=$?
                 fi
-            } &
-            fallback_watchdog_pid=$!
-            
-            # Run ffmpeg and capture its PID
-            ffmpeg "${fallback_args[@]}" 2>>"$stderr_file" &
-            fallback_ffmpeg_pid=$!
-            wait "$fallback_ffmpeg_pid"
-            ffmpeg_result=$?
-            
-            # Kill the watchdog timer
+            else
+                # Fallback method using background process and kill
+                echo "Starting fallback ffmpeg with manual timeout..." >> "$LOG_FILE"
+                
+                # Start ffmpeg and capture PID
+                ffmpeg "${fallback_args[@]}" 2>>"$stderr_file" &
+                fallback_ffmpeg_pid=$!
+                
+                # Start a watchdog in the background
+                {
+                    # Wait for completion with timeout
+                    for ((i=1; i<=$ffmpeg_timeout; i++)); do
+                        # Check if process is still running
+                        if ! ps -p $fallback_ffmpeg_pid > /dev/null 2>&1; then
+                            break  # Process finished
+                        fi
+                        
+                        # Print progress every 60 seconds
+                        if ((i % 60 == 0)); then
+                            echo "fallback ffmpeg running for $i seconds..." >> "$LOG_FILE"
+                        fi
+                        
+                        # Sleep briefly
+                        sleep 1
+                    done
+                    
+                    # Kill if still running after timeout
+                    if ps -p $fallback_ffmpeg_pid > /dev/null 2>&1; then
+                        echo "Killing fallback ffmpeg process after $ffmpeg_timeout second timeout..." >> "$LOG_FILE"
+                        kill -9 $fallback_ffmpeg_pid > /dev/null 2>&1
+                        # Also signal that we'''re done to the progress monitor
+                        touch "${progress_file}.done" 2>/dev/null || true
+                    fi
+                } &
+                fallback_watchdog_pid=$!
+                
+                # Wait for ffmpeg to complete
+                wait $fallback_ffmpeg_pid
+                ffmpeg_result=$?
+                
+                # Kill the watchdog
+                if [ -n "$fallback_watchdog_pid" ]; then
+                    kill $fallback_watchdog_pid > /dev/null 2>&1 || true
+                fi
+            }
             if [ -n "$fallback_watchdog_pid" ]; then
                 kill "$fallback_watchdog_pid" 2>/dev/null || true
             fi
@@ -1382,19 +1525,34 @@ EOF
     fi
     
     # Clean up temporary directory
+    echo "Cleaning up temporary directory: $temp_dir" >> "$LOG_FILE"
+    
+    # Kill any lingering processes that might be using the temp directory
+    lsof "$temp_dir" 2>/dev/null | grep -v PID | awk '{print $2}' | xargs kill -9 2>/dev/null || true
+    
+    # Make sure all files are writable for deletion
     chmod -R +w "$temp_dir" 2>/dev/null
+    
+    # Try to remove the directory
     rm -rf "$temp_dir" 2>/dev/null
     
     # If the directory still exists, try a more forceful approach
     if [ -d "$temp_dir" ]; then
         echo "Warning: Could not remove temp directory using standard method, trying alternative..." >> "$LOG_FILE"
+        
+        # Try multiple deletion methods
         find "$temp_dir" -type f -exec rm -f {} \; 2>/dev/null
         find "$temp_dir" -type d -empty -delete 2>/dev/null
         rmdir "$temp_dir" 2>/dev/null
         
-        # If still exists, just warn but continue
+        # If still exists, try one more time with a small delay
         if [ -d "$temp_dir" ]; then
-            echo "Warning: Temp directory could not be fully cleaned up: $temp_dir" >> "$LOG_FILE"
+            echo "Warning: Trying one more time to clean up directory: $temp_dir" >> "$LOG_FILE"
+            sleep 2  # Small delay to ensure processes are finished
+            rm -rf "$temp_dir" 2>/dev/null || {
+                echo "Warning: Temp directory could not be fully cleaned up: $temp_dir" >> "$LOG_FILE"
+                echo "Will be cleaned up on next run" >> "$LOG_FILE"
+            }
         fi
     fi
     echo "Processing completed for: $book_name" | tee -a "$LOG_FILE"
@@ -1417,6 +1575,15 @@ echo "-------------------------------------------" >> "$LOG_FILE"
 
 # Shared array to keep track of processed books
 declare -a processed_books
+# Counter for processed books
+processed_count=0
+
+# Function to get and increment the processed count
+get_processed_count() {
+    local current_count=$processed_count
+    processed_count=$((processed_count + 1))
+    echo $current_count
+}
 
 # Function to check if a directory has already been processed
 is_book_processed() {
@@ -1549,19 +1716,24 @@ process_directory() {
 
 # Main directory processing - use array instead of pipe to prevent subshell issues
 # Compatible approach for older bash versions that don't have readarray
-top_dirs=()
-while IFS= read -r line; do
-    top_dirs+=("$line")
-done < <(find "$AUDIOBOOKS_DIR" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*")
+main() {
+    top_dirs=()
+    while IFS= read -r line; do
+        top_dirs+=("$line")
+    done < <(find "$AUDIOBOOKS_DIR" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*")
+    
+    # Count total top-level directories
+    echo "Found ${#top_dirs[@]} top-level directories to process"
+    echo "Found ${#top_dirs[@]} top-level directories to process" >> "$LOG_FILE"
+    
+    # Process each top directory
+    for dir in "${top_dirs[@]}"; do
+        process_directory "$dir" 0
+    done
+}
 
-# Count total top-level directories
-echo "Found ${#top_dirs[@]} top-level directories to process"
-echo "Found ${#top_dirs[@]} top-level directories to process" >> "$LOG_FILE"
-
-# Process each top directory
-for dir in "${top_dirs[@]}"; do
-    process_directory "$dir" 0
-done
+# Call the main function
+main
 
 echo "Batch processing completed. Check $LOG_FILE for details."
 echo "Batch processing completed. Check $LOG_FILE for details." >> "$LOG_FILE"
