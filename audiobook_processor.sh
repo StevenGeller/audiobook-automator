@@ -228,20 +228,42 @@ process_audiobook() {
     # Make sure we have write permissions
     chmod -R 700 "$temp_dir" 2>/dev/null
     
-    # Step 1: Gather audiobook files (mp3, m4a, flac, etc.)
+    # Step 1: Gather audiobook files (mp3, m4a, flac, etc.) and check for m4b files
     echo "Gathering audio files..." >> "$LOG_FILE"
+    
     # Use a temp file to store the file list to avoid issues with newlines and spaces
     local files_temp="$temp_dir/audio_files_list.txt"
     fd -e mp3 -e m4a -e flac -e wav -e aac . "$book_dir" --exclude "$temp_dir" | sort > "$files_temp"
     local audio_files=$(cat "$files_temp")
     
+    # Check for existing m4b files
+    local m4b_files=""
+    local has_m4b_files=false
+    if m4b_files=$(find "$book_dir" -maxdepth 1 -name "*.m4b" 2>/dev/null); then
+        if [ -n "$m4b_files" ]; then
+            has_m4b_files=true
+            echo "Found existing m4b files in the directory" | tee -a "$LOG_FILE"
+        fi
+    fi
+    
     # Debug audio files found
     echo "Debug - Audio files found: $(wc -l < "$files_temp") files" | tee -a "$LOG_FILE"
+    if [ "$has_m4b_files" = true ]; then
+        echo "Debug - M4B files found: $(echo "$m4b_files" | wc -l) files" | tee -a "$LOG_FILE"
+    fi
     
-    if [ -z "$audio_files" ]; then
-        echo "No audio files found in $book_dir" | tee -a "$LOG_FILE"
+    # If we have neither audio files nor m4b files, exit
+    if [ -z "$audio_files" ] && [ "$has_m4b_files" = false ]; then
+        echo "No audio or m4b files found in $book_dir" | tee -a "$LOG_FILE"
         rm -rf "$temp_dir"
         return
+    fi
+    
+    # If we only have m4b files, we'll process those
+    local process_existing_m4b=false
+    if [ -z "$audio_files" ] && [ "$has_m4b_files" = true ]; then
+        echo "Only m4b files found, will process these for metadata and organization" | tee -a "$LOG_FILE"
+        process_existing_m4b=true
     fi
     
     # Step 2: Extract metadata from various sources
@@ -1019,55 +1041,139 @@ EOF
     # Final output file in the processed directory (flat structure)
     local final_output_file="$processed_dir/${output_filename}.m4b"
     
-    # Step 5: Create m4b file with metadata, chapters, and cover art
-    echo "Creating m4b file..." >> "$LOG_FILE"
-    
-    # Log if we will be adding cover art
-    if [ -n "$cover_art" ] && [ -f "$cover_art" ]; then
-        echo "Adding cover art from: $cover_art" >> "$LOG_FILE"
-    else
-        echo "No cover art will be added" >> "$LOG_FILE"
-    fi
-    
-    # Log metadata that will be used
-    echo "Using metadata:" >> "$LOG_FILE"
-    echo "- Title: $title" >> "$LOG_FILE"
-    echo "- Author: $author" >> "$LOG_FILE"
-    echo "- Genre: $genre" >> "$LOG_FILE"
-    if [ -n "$narrator" ]; then echo "- Narrator: $narrator" >> "$LOG_FILE"; fi
-    if [ -n "$series" ]; then 
-        echo "- Series: $series" >> "$LOG_FILE"
-        if [ -n "$series_part" ]; then echo "- Series Part: $series_part" >> "$LOG_FILE"; fi
-    fi
-    if [ -n "$year" ]; then echo "- Year: $year" >> "$LOG_FILE"; fi
-    
-    # Truncate description if too long
-    if [ -n "$description" ]; then
-        if [ ${#description} -gt 255 ]; then
-            description="${description:0:252}..."
+    # Step 5: Create m4b file with metadata, chapters, and cover art (or process existing m4b)
+    if [ "$process_existing_m4b" = true ]; then
+        echo "Processing existing m4b file..." >> "$LOG_FILE"
+        
+        # Find the first m4b file
+        local existing_m4b=$(echo "$m4b_files" | head -n 1)
+        if [ -z "$existing_m4b" ]; then
+            echo "Error: Could not find m4b file despite earlier detection" | tee -a "$LOG_FILE"
+            rm -rf "$temp_dir"
+            return
         fi
-        echo "- Description: (truncated to 255 chars)" >> "$LOG_FILE"
-    fi
+        
+        echo "Using existing m4b file: $(basename "$existing_m4b")" | tee -a "$LOG_FILE"
+        
+        # If we have an existing m4b, just copy it to the temp directory
+        cp "$existing_m4b" "$temp_output_file" || {
+            echo "Error: Failed to copy existing m4b file to temp directory" | tee -a "$LOG_FILE"
+            rm -rf "$temp_dir"
+            return
+        }
+        
+        # If we don't have sufficient metadata but have an m4b file, extract from it
+        if [ -z "$title" ] || [ -z "$author" ]; then
+            echo "Extracting metadata from existing m4b file..." | tee -a "$LOG_FILE"
+            
+            # Use mediainfo to extract metadata
+            local m4b_info=$(mediainfo "$existing_m4b")
+            
+            if [ -z "$title" ]; then
+                local m4b_title=$(echo "$m4b_info" | grep -i "Album" | head -n 1 | cut -d: -f2- | xargs)
+                if [ -n "$m4b_title" ]; then
+                    title="$m4b_title"
+                    title_source="existing m4b"
+                    echo "- Extracted title from m4b: $title" | tee -a "$LOG_FILE"
+                fi
+            fi
+            
+            if [ -z "$author" ]; then
+                local m4b_author=$(echo "$m4b_info" | grep -i "Performer" | head -n 1 | cut -d: -f2- | xargs)
+                if [ -n "$m4b_author" ]; then
+                    author="$m4b_author"
+                    author_source="existing m4b"
+                    echo "- Extracted author from m4b: $author" | tee -a "$LOG_FILE"
+                fi
+            fi
+        fi
+        
+        # If we still don't have enough metadata, use the filename
+        if [ -z "$title" ] || [ -z "$author" ]; then
+            local m4b_basename=$(basename "$existing_m4b" .m4b)
+            
+            if [[ "$m4b_basename" == *" - "* ]]; then
+                if [ -z "$author" ]; then
+                    author=$(echo "$m4b_basename" | cut -d'-' -f1 | xargs)
+                    author_source="m4b filename"
+                    echo "- Extracted author from m4b filename: $author" | tee -a "$LOG_FILE"
+                fi
+                
+                if [ -z "$title" ]; then
+                    title=$(echo "$m4b_basename" | cut -d'-' -f2- | xargs)
+                    title_source="m4b filename"
+                    echo "- Extracted title from m4b filename: $title" | tee -a "$LOG_FILE"
+                fi
+            fi
+        fi
+        
+        # If we still don't have enough metadata, use fallbacks
+        if [ -z "$title" ]; then
+            title=$(basename "$book_dir")
+            title_source="directory name"
+            echo "- Using directory name as title: $title" | tee -a "$LOG_FILE"
+        fi
+        
+        if [ -z "$author" ]; then
+            author="Unknown Author"
+            author_source="default"
+            echo "- Using default author: $author" | tee -a "$LOG_FILE"
+        fi
+        
+        # Set dummy variables for processing to continue
+        local ffmpeg_result=0
+        # Skip to the moving stage
+        echo "Skipping ffmpeg conversion, using existing m4b file" | tee -a "$LOG_FILE"
+        touch "${progress_file}.done" 2>/dev/null
+    else
+        echo "Creating m4b file..." >> "$LOG_FILE"
+        
+        # Log if we will be adding cover art
+        if [ -n "$cover_art" ] && [ -f "$cover_art" ]; then
+            echo "Adding cover art from: $cover_art" >> "$LOG_FILE"
+        else
+            echo "No cover art will be added" >> "$LOG_FILE"
+        fi
+        
+        # Log metadata that will be used
+        echo "Using metadata:" >> "$LOG_FILE"
+        echo "- Title: $title" >> "$LOG_FILE"
+        echo "- Author: $author" >> "$LOG_FILE"
+        echo "- Genre: $genre" >> "$LOG_FILE"
+        if [ -n "$narrator" ]; then echo "- Narrator: $narrator" >> "$LOG_FILE"; fi
+        if [ -n "$series" ]; then 
+            echo "- Series: $series" >> "$LOG_FILE"
+            if [ -n "$series_part" ]; then echo "- Series Part: $series_part" >> "$LOG_FILE"; fi
+        fi
+        if [ -n "$year" ]; then echo "- Year: $year" >> "$LOG_FILE"; fi
+        
+        # Truncate description if too long
+        if [ -n "$description" ]; then
+            if [ ${#description} -gt 255 ]; then
+                description="${description:0:252}..."
+            fi
+            echo "- Description: (truncated to 255 chars)" >> "$LOG_FILE"
+        fi
+        
+        # We're going to run ffmpeg directly instead of building a command string
+        
+        # Execute the command
+        echo "Converting to m4b format..."
+        # This text won't be displayed to terminal, only in log
+        echo "Running ffmpeg command in background..." >> "$LOG_FILE"
     
-    # We're going to run ffmpeg directly instead of building a command string
-    
-    # Execute the command
-    echo "Converting to m4b format..."
-    # This text won't be displayed to terminal, only in log
-    echo "Running ffmpeg command in background..." >> "$LOG_FILE"
-    
-    # Check if the output directory is writable
-    if [ ! -w "$(dirname "$output_file")" ]; then
-        echo "ERROR: Output directory is not writable: $(dirname "$output_file")" | tee -a "$LOG_FILE"
-        echo "Skipping this audiobook" | tee -a "$LOG_FILE"
-        rm -rf "$temp_dir"
-        return
-    fi
-    
-    # Execute the command with progress bar
-    set +e  # Disable exit on error temporarily
-    
-    # Redirect stderr to a file for analysis
+        # Check if the output directory is writable
+        if [ ! -w "$(dirname "$output_file")" ]; then
+            echo "ERROR: Output directory is not writable: $(dirname "$output_file")" | tee -a "$LOG_FILE"
+            echo "Skipping this audiobook" | tee -a "$LOG_FILE"
+            rm -rf "$temp_dir"
+            return
+        fi
+        
+        # Execute the command with progress bar
+        set +e  # Disable exit on error temporarily
+        
+        # Redirect stderr to a file for analysis
     local stderr_file="$temp_dir/ffmpeg_stderr.log"
     local progress_file="$temp_dir/progress.txt"
     
@@ -1493,27 +1599,28 @@ process_directory() {
     
     # Check if directory already has an m4b file
     local has_m4b_files=false
-    if find "$dir" -maxdepth 1 -name "*.m4b" | grep -q .; then
-        has_m4b_files=true
+    local m4b_files=""
+    if m4b_files=$(find "$dir" -maxdepth 1 -name "*.m4b" 2>/dev/null); then
+        if [ -n "$m4b_files" ]; then
+            has_m4b_files=true
+        fi
     fi
     
-    if [ "$has_audio_files" = true ]; then
-        # Only print to console if we actually found audio files to process
-        echo "Found audiobook: $dir_name"
-        echo "${indent}Found audio files in $dir_name" >> "$LOG_FILE"
+    # Process if we have audio files OR m4b files
+    if [ "$has_audio_files" = true ] || [ "$has_m4b_files" = true ]; then
+        # Add to processed list (before processing, to prevent reprocessing if something goes wrong)
+        processed_books+=("$dir")
         
-        # Check if we already have an m4b file and no source files
-        if [ "$has_m4b_files" = true ] && [ "$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$dir" --max-depth 1 | wc -l)" -le 2 ]; then
-            echo "${indent}Directory already contains m4b file and few source files, likely already processed" >> "$LOG_FILE"
-            # Still mark as processed to avoid reprocessing
-            processed_books+=("$dir")
-        else
-            # Add to processed list (before processing, to prevent reprocessing if something goes wrong)
-            processed_books+=("$dir")
-            
-            # Process the audiobook
-            process_audiobook "$dir"
+        if [ "$has_audio_files" = true ]; then
+            echo "Found audiobook with audio files: $dir_name"
+            echo "${indent}Found audio files in $dir_name" >> "$LOG_FILE"
+        elif [ "$has_m4b_files" = true ]; then
+            echo "Found existing m4b audiobook: $dir_name"
+            echo "${indent}Found existing m4b files in $dir_name" >> "$LOG_FILE"
         fi
+        
+        # Always process the audiobook, even if it's an m4b
+        process_audiobook "$dir"
     fi
     
     # Always check subdirectories regardless of whether we processed this directory or not
