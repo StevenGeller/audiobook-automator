@@ -48,6 +48,44 @@ sanitize_filename() {
     echo "$1" | sed 's/[^a-zA-Z0-9._-]/_/g'
 }
 
+# Function to display progress bar
+show_progress() {
+    local total_duration=$1
+    local pid=$2
+    local progress_file="$3"
+    local book_name="$4"
+    
+    # Initialize progress file
+    echo "0" > "$progress_file"
+    
+    # Calculate width based on terminal size
+    local width=$(tput cols)
+    local bar_size=$((width - 30))
+    
+    # Display the progress bar and update it
+    while kill -0 $pid 2>/dev/null; do
+        if [ -f "$progress_file" ]; then
+            local current_time=$(cat "$progress_file")
+            if [[ "$current_time" =~ ^[0-9]+$ ]]; then
+                local percentage=$((current_time * 100 / total_duration))
+                [ $percentage -gt 100 ] && percentage=100
+                
+                # Calculate bar width
+                local completed=$((percentage * bar_size / 100))
+                local remaining=$((bar_size - completed))
+                
+                # Build the progress bar
+                local bar=$(printf "%${completed}s" | tr " " "=")$(printf "%${remaining}s" | tr " " " ")
+                
+                # Clear line and print progress
+                printf "\r\033[K[%s] %3d%% %s" "$bar" "$percentage" "$book_name"
+            fi
+        fi
+        sleep 1
+    done
+    printf "\r\033[K"  # Clear the line when done
+}
+
 # Function to extract metadata from filename patterns
 extract_filename_metadata() {
     local filename="$1"
@@ -136,21 +174,22 @@ process_audiobook() {
     local book_dir="$1"
     local book_name=$(basename "$book_dir")
     
-    echo "Processing: $book_name" | tee -a "$LOG_FILE"
+    echo "Processing: $book_name"
+    echo "Processing: $book_name" >> "$LOG_FILE"
     
     # Create a temporary directory for processing
     local temp_dir="$book_dir/temp_processing"
     
     # Check if temp directory already exists (from a previous failed run)
     if [ -d "$temp_dir" ]; then
-        echo "Found existing temp directory, cleaning up first..." | tee -a "$LOG_FILE"
+        echo "Found existing temp directory, cleaning up first..." >> "$LOG_FILE"
         rm -rf "$temp_dir"
     fi
     
     mkdir -p "$temp_dir"
     
     # Step 1: Gather audiobook files (mp3, m4a, flac, etc.)
-    echo "Gathering audio files..." | tee -a "$LOG_FILE"
+    echo "Gathering audio files..." >> "$LOG_FILE"
     # Use a temp file to store the file list to avoid issues with newlines and spaces
     local files_temp="$temp_dir/audio_files_list.txt"
     fd -e mp3 -e m4a -e flac -e wav -e aac . "$book_dir" --exclude "$temp_dir" | sort > "$files_temp"
@@ -166,7 +205,7 @@ process_audiobook() {
     fi
     
     # Step 2: Extract metadata from various sources
-    echo "=== PHASE 1: METADATA EXTRACTION ===" | tee -a "$LOG_FILE"
+    echo "=== PHASE 1: METADATA EXTRACTION ===" >> "$LOG_FILE"
     
     # Initialize metadata variables
     local author=""
@@ -919,39 +958,40 @@ EOF
     local final_output_file="$book_dir/${output_filename}.m4b"
     
     # Step 5: Create m4b file with metadata, chapters, and cover art
-    echo "Creating m4b file..." | tee -a "$LOG_FILE"
+    echo "Creating m4b file..." >> "$LOG_FILE"
     
     # Log if we will be adding cover art
     if [ -n "$cover_art" ] && [ -f "$cover_art" ]; then
-        echo "Adding cover art from: $cover_art" | tee -a "$LOG_FILE"
+        echo "Adding cover art from: $cover_art" >> "$LOG_FILE"
     else
-        echo "No cover art will be added" | tee -a "$LOG_FILE"
+        echo "No cover art will be added" >> "$LOG_FILE"
     fi
     
     # Log metadata that will be used
-    echo "Using metadata:" | tee -a "$LOG_FILE"
-    echo "- Title: $title" | tee -a "$LOG_FILE"
-    echo "- Author: $author" | tee -a "$LOG_FILE"
-    echo "- Genre: $genre" | tee -a "$LOG_FILE"
-    if [ -n "$narrator" ]; then echo "- Narrator: $narrator" | tee -a "$LOG_FILE"; fi
+    echo "Using metadata:" >> "$LOG_FILE"
+    echo "- Title: $title" >> "$LOG_FILE"
+    echo "- Author: $author" >> "$LOG_FILE"
+    echo "- Genre: $genre" >> "$LOG_FILE"
+    if [ -n "$narrator" ]; then echo "- Narrator: $narrator" >> "$LOG_FILE"; fi
     if [ -n "$series" ]; then 
-        echo "- Series: $series" | tee -a "$LOG_FILE"
-        if [ -n "$series_part" ]; then echo "- Series Part: $series_part" | tee -a "$LOG_FILE"; fi
+        echo "- Series: $series" >> "$LOG_FILE"
+        if [ -n "$series_part" ]; then echo "- Series Part: $series_part" >> "$LOG_FILE"; fi
     fi
-    if [ -n "$year" ]; then echo "- Year: $year" | tee -a "$LOG_FILE"; fi
+    if [ -n "$year" ]; then echo "- Year: $year" >> "$LOG_FILE"; fi
     
     # Truncate description if too long
     if [ -n "$description" ]; then
         if [ ${#description} -gt 255 ]; then
             description="${description:0:252}..."
         fi
-        echo "- Description: (truncated to 255 chars)" | tee -a "$LOG_FILE"
+        echo "- Description: (truncated to 255 chars)" >> "$LOG_FILE"
     fi
     
     # We're going to run ffmpeg directly instead of building a command string
     
     # Execute the command
-    echo "Running ffmpeg command..." | tee -a "$LOG_FILE"
+    echo "Converting to m4b format..."
+    echo "Running ffmpeg command..." >> "$LOG_FILE"
     
     # Check if the output directory is writable
     if [ ! -w "$(dirname "$output_file")" ]; then
@@ -961,29 +1001,56 @@ EOF
         return
     fi
     
-    # Execute the command and capture the result
+    # Execute the command with progress bar
     set +e  # Disable exit on error temporarily
+    
     # Redirect stderr to a file for analysis
     local stderr_file="$temp_dir/ffmpeg_stderr.log"
-    # Create a debug log file
-    touch "$temp_dir/ffmpeg_debug.log"
-    # Run ffmpeg directly without using eval to avoid issues with line numbers
-    ffmpeg -y -nostdin -f concat -safe 0 -i "$file_list" -i "$chapters_file" \
-        $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-i $cover_art") \
-        -map_metadata 1 \
-        $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-map 0:a -map 2:v -disposition:v:0 attached_pic" || echo "-map 0:a") \
-        -c:a aac -b:a 64k -movflags +faststart \
-        -metadata title="$title" \
-        -metadata artist="$author" \
-        -metadata album="$title" \
-        -metadata genre="$genre" \
-        $([[ -n "$narrator" ]] && echo "-metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\"") \
-        $([[ -n "$series" ]] && echo "-metadata show=\"$series\"") \
-        $([[ -n "$series" && -n "$series_part" ]] && echo "-metadata episode_id=\"$series_part\"") \
-        $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
-        $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
-        "$temp_output_file" 2>"$stderr_file"
-        
+    local progress_file="$temp_dir/progress.txt"
+    
+    # Calculate total audio duration in seconds
+    local total_duration=0
+    echo "Calculating total duration..." >> "$LOG_FILE"
+    for audio_file in $audio_files; do
+        if [ -f "$audio_file" ]; then
+            local file_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file")
+            if [ -n "$file_duration" ]; then
+                file_duration=${file_duration%.*} # truncate decimal part
+                total_duration=$((total_duration + file_duration))
+            fi
+        fi
+    done
+    
+    # Run ffmpeg in background to allow progress monitoring
+    (
+        # Run ffmpeg with progress output
+        ffmpeg -y -nostdin -f concat -safe 0 -i "$file_list" -i "$chapters_file" \
+            $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-i $cover_art") \
+            -map_metadata 1 \
+            $([[ -n "$cover_art" && -f "$cover_art" ]] && echo "-map 0:a -map 2:v -disposition:v:0 attached_pic" || echo "-map 0:a") \
+            -c:a aac -b:a 64k -movflags +faststart \
+            -metadata title="$title" \
+            -metadata artist="$author" \
+            -metadata album="$title" \
+            -metadata genre="$genre" \
+            $([[ -n "$narrator" ]] && echo "-metadata composer=\"$narrator\" -metadata comment=\"Narrator: $narrator\"") \
+            $([[ -n "$series" ]] && echo "-metadata show=\"$series\"") \
+            $([[ -n "$series" && -n "$series_part" ]] && echo "-metadata episode_id=\"$series_part\"") \
+            $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
+            $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
+            -progress - "$temp_output_file" 2>"$stderr_file" | \
+        grep --line-buffered -o "out_time_ms=[0-9]*" | grep --line-buffered -o "[0-9]*" | \
+        awk '{printf "%d\n", $1/1000000}' > "$progress_file"
+    ) &
+    
+    # Capture the FFmpeg process ID
+    local ffmpeg_pid=$!
+    
+    # Show progress bar
+    show_progress "$total_duration" "$ffmpeg_pid" "$progress_file" "$book_name"
+    
+    # Wait for FFmpeg to finish
+    wait $ffmpeg_pid
     local ffmpeg_result=$?
     set -e  # Re-enable exit on error
     
@@ -1014,11 +1081,12 @@ EOF
     
     # Check if output file was created
     if [ -f "$temp_output_file" ]; then
-        echo "Successfully created: $temp_output_file" | tee -a "$LOG_FILE"
+        echo "Successfully created: $temp_output_file" >> "$LOG_FILE"
         
         # Move the file to final location
         mv "$temp_output_file" "$final_output_file"
-        echo "Moved file to: $final_output_file" | tee -a "$LOG_FILE"
+        echo "Created: $final_output_file"
+        echo "Moved file to: $final_output_file" >> "$LOG_FILE"
         
         # Get file info
         local file_info=$(mediainfo "$final_output_file")
@@ -1027,7 +1095,7 @@ EOF
         
         # Clean up original files if requested
         if [ "$KEEP_ORIGINAL_FILES" = false ]; then
-            echo "Cleaning up original audio files..." | tee -a "$LOG_FILE"
+            echo "Cleaning up original audio files..." >> "$LOG_FILE"
             # Store the files we'll delete in a variable for safety
             local original_files=$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$book_dir" --max-depth 1)
             
@@ -1054,14 +1122,15 @@ EOF
                     echo "Removing original audio files..." | tee -a "$LOG_FILE"
                     
                     # Delete each file individually for better control
+                    echo "Removing original files..." 
                     for file in $original_files; do
                         if [ -f "$file" ]; then
                             rm "$file"
-                            echo "Deleted: $file" | tee -a "$LOG_FILE"
+                            echo "Deleted: $file" >> "$LOG_FILE"
                         fi
                     done
                     
-                    echo "Original files cleaned up successfully" | tee -a "$LOG_FILE"
+                    echo "Original files cleaned up successfully" >> "$LOG_FILE"
                 else
                     echo "WARNING: M4B file size ($m4b_size bytes) is too small compared to originals ($total_original_size bytes)" | tee -a "$LOG_FILE"
                     echo "Keeping original files as a precaution" | tee -a "$LOG_FILE"
@@ -1083,13 +1152,16 @@ EOF
 }
 
 # Main script execution
-echo "Starting in-place processing of audiobooks in $AUDIOBOOKS_DIR" | tee -a "$LOG_FILE"
+echo "Starting in-place processing of audiobooks in $AUDIOBOOKS_DIR"
+echo "Starting in-place processing of audiobooks in $AUDIOBOOKS_DIR" >> "$LOG_FILE"
 if [ "$KEEP_ORIGINAL_FILES" = true ]; then
-    echo "Original files will be kept after processing (--keep-original-files flag is set)" | tee -a "$LOG_FILE"
+    echo "Original files will be kept after processing (--keep-original-files flag is set)"
+    echo "Original files will be kept after processing (--keep-original-files flag is set)" >> "$LOG_FILE"
 else
-    echo "Original files will be removed after successful m4b conversion" | tee -a "$LOG_FILE"
+    echo "Original files will be removed after successful m4b conversion"
+    echo "Original files will be removed after successful m4b conversion" >> "$LOG_FILE"
 fi
-echo "-------------------------------------------" | tee -a "$LOG_FILE"
+echo "-------------------------------------------" >> "$LOG_FILE"
 
 # Find all potential audiobook directories (containing audio files)
 find "$AUDIOBOOKS_DIR" -type d -not -path "*/temp_processing*" | while read -r dir; do
@@ -1099,11 +1171,11 @@ find "$AUDIOBOOKS_DIR" -type d -not -path "*/temp_processing*" | while read -r d
     fi
     
     # Debug info
-    echo "Checking directory: $dir" | tee -a "$LOG_FILE"
+    echo "Checking directory: $dir" >> "$LOG_FILE"
     
     # Check if directory contains audio files using a more robust approach
     if fd -e mp3 -e m4a -e flac -e wav -e aac . "$dir" --max-depth 1 | grep -q .; then
-        echo "Found audio files in $dir" | tee -a "$LOG_FILE"
+        echo "Found audio files in $dir" >> "$LOG_FILE"
         process_audiobook "$dir"
     else
         echo "No audio files found directly in $dir, checking if it's a series/author directory..." | tee -a "$LOG_FILE"
@@ -1117,12 +1189,20 @@ find "$AUDIOBOOKS_DIR" -type d -not -path "*/temp_processing*" | while read -r d
     fi
 done
 
-echo "Batch processing completed. Check $LOG_FILE for details." | tee -a "$LOG_FILE"
+echo "Batch processing completed. Check $LOG_FILE for details."
+echo "Batch processing completed. Check $LOG_FILE for details." >> "$LOG_FILE"
 
 # Generate summary report
-echo "-------------------------------------------" | tee -a "$LOG_FILE"
-echo "Processing Summary:" | tee -a "$LOG_FILE"
-echo "Total audiobooks processed: $(grep -c "Processing completed for:" "$LOG_FILE")" | tee -a "$LOG_FILE"
-echo "Total m4b files: $(find "$AUDIOBOOKS_DIR" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "-------------------------------------------" | tee -a "$LOG_FILE"
-echo "Finished. Audio books processed in: $AUDIOBOOKS_DIR" | tee -a "$LOG_FILE"
+echo "-------------------------------------------" >> "$LOG_FILE"
+echo "Processing Summary:" >> "$LOG_FILE"
+processed_count=$(grep -c "Processing completed for:" "$LOG_FILE")
+m4b_count=$(find "$AUDIOBOOKS_DIR" -type f -name "*.m4b" | wc -l)
+echo "Total audiobooks processed: $processed_count" >> "$LOG_FILE"
+echo "Total m4b files: $m4b_count" >> "$LOG_FILE"
+echo "-------------------------------------------" >> "$LOG_FILE"
+echo "Finished. Audio books processed in: $AUDIOBOOKS_DIR" >> "$LOG_FILE"
+
+# Show concise summary to the user
+echo "-------------------------------------------"
+echo "Processing Summary: $processed_count audiobooks processed, $m4b_count m4b files created"
+echo "Finished. See $LOG_FILE for details."
