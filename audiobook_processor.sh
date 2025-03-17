@@ -126,6 +126,14 @@ extract_filename_metadata() {
         return 0
     fi
     
+    # Pattern 8: "NN - Title - Author - Year" (for collections like "Top 100 Science Fiction")
+    if [[ "$filename" =~ ^([0-9]+)\ -\ (.+)\ -\ (.+)\ -\ ([0-9]{4})$ ]]; then
+        metadata[0]="${BASH_REMATCH[3]}" # Author
+        metadata[1]="${BASH_REMATCH[2]}" # Title
+        metadata[2]="${BASH_REMATCH[4]}" # Year
+        return 0
+    fi
+    
     # If no pattern matches, return 1 (false)
     return 1
 }
@@ -186,7 +194,19 @@ process_audiobook() {
     
     # 2.1: First attempt - directory name
     echo "Checking directory name pattern: $book_name" | tee -a "$LOG_FILE"
-    if [[ "$book_name" == *" - "* ]]; then
+    
+    # Special pattern for numbered collections (e.g., "51 - Battlefield Earth - L Ron Hubbard - 1982")
+    if [[ "$book_name" =~ ^([0-9]+)\ -\ (.+)\ -\ (.+)\ -\ ([0-9]{4})$ ]]; then
+        title="${BASH_REMATCH[2]}"
+        author="${BASH_REMATCH[3]}"
+        year="${BASH_REMATCH[4]}"
+        title_source="directory name (collection)"
+        author_source="directory name (collection)"
+        echo "- Found title from collection directory: $title" | tee -a "$LOG_FILE"
+        echo "- Found author from collection directory: $author" | tee -a "$LOG_FILE"
+        echo "- Found year from collection directory: $year" | tee -a "$LOG_FILE"
+    # Handle regular directory name patterns with dashes
+    elif [[ "$book_name" == *" - "* ]]; then
         # Handle cases where directory name might contain series information
         if [[ "$book_name" =~ (.+)\ -\ (.+)\ -\ (.+) ]]; then
             # Pattern matches Author - Series - Title or similar
@@ -328,6 +348,34 @@ process_audiobook() {
         if [ -n "$tag_genre" ] && [ "$tag_genre" != "Audiobook" ]; then
             genre="$tag_genre"
             echo "- Found genre from tags: $genre" | tee -a "$LOG_FILE"
+        fi
+    fi
+    
+    # Check parent directory for additional context (like collection or genre information)
+    local parent_dir=$(dirname "$book_dir")
+    local parent_name=$(basename "$parent_dir")
+    echo "Checking parent directory: $parent_name" | tee -a "$LOG_FILE"
+    
+    # If the parent directory is a collection (e.g., "Top 100 Science Fiction")
+    if [[ "$parent_name" =~ [Tt]op|[Bb]est|[Cc]ollection|[Cc]ompilation|[Aa]nthology ]]; then
+        echo "- Parent directory appears to be a collection: $parent_name" | tee -a "$LOG_FILE"
+        
+        # Try to extract genre information from parent directory name
+        if [[ "$parent_name" =~ [Ss]cience[[:space:]]*[Ff]iction ]]; then
+            genre="Science Fiction"
+            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
+        elif [[ "$parent_name" =~ [Ff]antasy ]]; then
+            genre="Fantasy"
+            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
+        elif [[ "$parent_name" =~ [Mm]ystery|[Tt]hriller|[Dd]etective ]]; then
+            genre="Mystery & Thriller"
+            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
+        elif [[ "$parent_name" =~ [Hh]orror ]]; then
+            genre="Horror"
+            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
+        elif [[ "$parent_name" =~ [Hh]istorical|[Hh]istory ]]; then
+            genre="Historical"
+            echo "- Found genre from parent directory: $genre" | tee -a "$LOG_FILE"
         fi
     fi
     
