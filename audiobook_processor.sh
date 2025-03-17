@@ -191,19 +191,43 @@ process_audiobook() {
     local book_dir="$1"
     local book_name=$(basename "$book_dir")
     
-    echo "Processing: $book_name"
-    echo "Processing: $book_name" >> "$LOG_FILE"
+    # Show book number out of total in array
+    local book_count=${#processed_books[@]}
+    echo "Processing audiobook $book_count: $book_name"
+    echo "Processing audiobook $book_count: $book_name" >> "$LOG_FILE"
     
-    # Create a temporary directory for processing
-    local temp_dir="$book_dir/temp_processing"
+    # For network shares, use a local temp directory to avoid permission issues
+    # Create a unique hash of the book directory path to use as an identifier
+    # Use md5 on macOS and md5sum on Linux
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        local dir_hash=$(echo "$book_dir" | md5)
+    else
+        local dir_hash=$(echo "$book_dir" | md5sum | cut -d' ' -f1)
+    fi
+    local temp_base="/tmp/audiobook_processor"
+    local temp_dir="${temp_base}/${dir_hash}"
+    
+    # Ensure the base temp directory exists
+    mkdir -p "$temp_base"
     
     # Check if temp directory already exists (from a previous failed run)
     if [ -d "$temp_dir" ]; then
         echo "Found existing temp directory, cleaning up first..." >> "$LOG_FILE"
-        rm -rf "$temp_dir"
+        rm -rf "$temp_dir" 2>/dev/null
+        
+        # If failed to remove, try forceful removal
+        if [ -d "$temp_dir" ]; then
+            find "$temp_dir" -type f -exec rm -f {} \; 2>/dev/null
+            find "$temp_dir" -depth -type d -exec rmdir {} \; 2>/dev/null
+            rm -rf "$temp_dir" 2>/dev/null
+        fi
     fi
     
+    # Create the temp directory
     mkdir -p "$temp_dir"
+    
+    # Make sure we have write permissions
+    chmod -R 700 "$temp_dir" 2>/dev/null
     
     # Step 1: Gather audiobook files (mp3, m4a, flac, etc.)
     echo "Gathering audio files..." >> "$LOG_FILE"
@@ -1238,6 +1262,22 @@ echo "Will search all nested directories for audio files automatically"
 echo "Will search all nested directories for audio files automatically" >> "$LOG_FILE"
 echo "-------------------------------------------" >> "$LOG_FILE"
 
+# Shared array to keep track of processed books
+declare -a processed_books
+
+# Function to check if a directory has already been processed
+is_book_processed() {
+    local check_dir="$1"
+    
+    for dir in "${processed_books[@]}"; do
+        if [ "$dir" = "$check_dir" ]; then
+            return 0 # Already processed
+        fi
+    done
+    
+    return 1 # Not processed yet
+}
+
 # Function to process directories recursively
 process_directory() {
     local dir="$1"
@@ -1245,6 +1285,12 @@ process_directory() {
     local indent=$(printf '%*s' "$level" '')
     
     local dir_name=$(basename "$dir")
+    
+    # Skip if this directory already processed (avoid duplicate processing)
+    if is_book_processed "$dir"; then
+        echo "${indent}Directory already processed, skipping: $dir_name" >> "$LOG_FILE"
+        return
+    fi
     
     # Debug info
     echo "${indent}Checking directory: $dir_name" >> "$LOG_FILE"
@@ -1254,27 +1300,47 @@ process_directory() {
         # Only print to console if we actually found audio files to process
         echo "Found audiobook: $dir_name"
         echo "${indent}Found audio files in $dir_name" >> "$LOG_FILE"
+        
+        # Add to processed list (before processing, to prevent reprocessing if something goes wrong)
+        processed_books+=("$dir")
+        
+        # Process the audiobook
         process_audiobook "$dir"
-    else
-        echo "${indent}No audio files found directly in $dir_name, checking subdirectories..." >> "$LOG_FILE"
-        # Check if there are subdirectories that might contain audio files
-        if find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | grep -q .; then
-            local subdirs_count=$(find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | wc -l)
+    fi
+    
+    # Always check subdirectories regardless of whether we processed this directory or not
+    # This ensures we continue processing all directories in the hierarchy
+    if find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | grep -q .; then
+        local subdirs_count=$(find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | wc -l)
+        
+        # Only show scanning message if we have subdirectories to process
+        if [ $subdirs_count -gt 0 ]; then
             echo "Scanning folder: $dir_name ($subdirs_count subdirectories)"
             echo "${indent}Found $subdirs_count subdirectories in $dir_name, processing each..." >> "$LOG_FILE"
             
-            # Process each subdirectory recursively
-            find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | while read -r subdir; do
+            # Use find to get subdirectories but process them in a separate loop to prevent subshell issues
+            readarray -t subdirs < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*")
+            
+            for subdir in "${subdirs[@]}"; do
                 process_directory "$subdir" $((level + 2))
             done
         else
-            echo "${indent}No subdirectories or audio files found in $dir_name, skipping" >> "$LOG_FILE"
+            echo "${indent}No subdirectories found in $dir_name" >> "$LOG_FILE"
         fi
+    else
+        echo "${indent}No subdirectories found in $dir_name" >> "$LOG_FILE"
     fi
 }
 
-# Main directory processing
-find "$AUDIOBOOKS_DIR" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*" | while read -r dir; do
+# Main directory processing - use array instead of pipe to prevent subshell issues
+readarray -t top_dirs < <(find "$AUDIOBOOKS_DIR" -mindepth 1 -maxdepth 1 -type d -not -path "*/temp_processing*")
+
+# Count total top-level directories
+echo "Found ${#top_dirs[@]} top-level directories to process"
+echo "Found ${#top_dirs[@]} top-level directories to process" >> "$LOG_FILE"
+
+# Process each top directory
+for dir in "${top_dirs[@]}"; do
     process_directory "$dir" 0
 done
 
