@@ -79,12 +79,22 @@ show_progress() {
     local width=$(tput cols)
     local bar_size=$((width - 30))
     
+    # Ensure we have a valid duration to avoid division by zero
+    if [ "$total_duration" -le 0 ]; then
+        total_duration=1  # Set a minimum duration to avoid division by zero
+    fi
+    
     # Display the progress bar and update it
     while kill -0 $pid 2>/dev/null; do
         if [ -f "$progress_file" ]; then
-            local current_time=$(cat "$progress_file")
+            local current_time=$(cat "$progress_file" 2>/dev/null || echo "0")
             if [[ "$current_time" =~ ^[0-9]+$ ]]; then
-                local percentage=$((current_time * 100 / total_duration))
+                # Prevent division by zero
+                if [ "$total_duration" -gt 0 ]; then
+                    local percentage=$((current_time * 100 / total_duration))
+                else
+                    local percentage=0
+                fi
                 [ $percentage -gt 100 ] && percentage=100
                 
                 # Calculate bar width
@@ -1072,13 +1082,23 @@ EOF
     echo "Calculating total duration..." >> "$LOG_FILE"
     for audio_file in $audio_files; do
         if [ -f "$audio_file" ]; then
-            local file_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file")
-            if [ -n "$file_duration" ]; then
+            local file_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file" 2>/dev/null)
+            if [ -n "$file_duration" ] && [[ "$file_duration" =~ ^[0-9]*\.?[0-9]*$ ]]; then
                 file_duration=${file_duration%.*} # truncate decimal part
-                total_duration=$((total_duration + file_duration))
+                # Make sure it's a valid number
+                if [[ "$file_duration" =~ ^[0-9]+$ ]]; then
+                    total_duration=$((total_duration + file_duration))
+                fi
             fi
         fi
     done
+    
+    # Ensure we have a minimum duration to avoid division by zero
+    if [ "$total_duration" -le 0 ]; then
+        echo "Warning: Could not determine audio duration, using default" >> "$LOG_FILE"
+        # Set a default duration (1 hour) if we couldn't determine actual duration
+        total_duration=3600
+    fi
     
     # Try different approaches until one succeeds
     local try_approach=1
