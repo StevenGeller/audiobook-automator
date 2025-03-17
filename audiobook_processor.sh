@@ -1070,22 +1070,57 @@ EOF
     # Calculate total audio duration in seconds
     local total_duration=0
     echo "Calculating total duration..." >> "$LOG_FILE"
-    for audio_file in $audio_files; do
-        if [ -f "$audio_file" ]; then
-            local file_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file" 2>/dev/null)
-            if [ -n "$file_duration" ] && [[ "$file_duration" =~ ^[0-9]*\.?[0-9]*$ ]]; then
-                file_duration=${file_duration%.*} # truncate decimal part
-                # Make sure it's a valid number
-                if [[ "$file_duration" =~ ^[0-9]+$ ]]; then
-                    total_duration=$((total_duration + file_duration))
+    
+    # Read filelist for more accurate file list
+    if [ -f "$file_list" ]; then
+        # Parse the file list to get the actual files
+        while IFS= read -r line; do
+            # Extract the file path from the line (remove 'file ' prefix and quotes)
+            if [[ "$line" =~ ^file[[:space:]]+\'(.+)\'$ ]]; then
+                local audio_file="${BASH_REMATCH[1]}"
+                if [ -f "$audio_file" ]; then
+                    # Use ffprobe to get the duration
+                    local file_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file" 2>/dev/null)
+                    if [ -n "$file_duration" ] && [[ "$file_duration" =~ ^[0-9]*\.?[0-9]*$ ]]; then
+                        # Convert to integer seconds
+                        file_duration=$(echo "$file_duration" | awk '{printf "%.0f", $1}')
+                        # Make sure it's a valid number
+                        if [[ "$file_duration" =~ ^[0-9]+$ ]]; then
+                            total_duration=$((total_duration + file_duration))
+                            echo "  - File: $(basename "$audio_file"), Duration: $(format_time $file_duration)" >> "$LOG_FILE"
+                        fi
+                    else
+                        echo "  - Could not determine duration for: $(basename "$audio_file")" >> "$LOG_FILE"
+                    fi
                 fi
             fi
-        fi
-    done
+        done < "$file_list"
+    else
+        echo "Warning: File list not found at $file_list" >> "$LOG_FILE"
+        # Fallback to direct file list
+        for audio_file in $audio_files; do
+            if [ -f "$audio_file" ]; then
+                local file_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file" 2>/dev/null)
+                if [ -n "$file_duration" ] && [[ "$file_duration" =~ ^[0-9]*\.?[0-9]*$ ]]; then
+                    # Convert to integer seconds
+                    file_duration=$(echo "$file_duration" | awk '{printf "%.0f", $1}')
+                    # Make sure it's a valid number
+                    if [[ "$file_duration" =~ ^[0-9]+$ ]]; then
+                        total_duration=$((total_duration + file_duration))
+                        echo "  - File: $(basename "$audio_file"), Duration: $(format_time $file_duration)" >> "$LOG_FILE"
+                    fi
+                else
+                    echo "  - Could not determine duration for: $(basename "$audio_file")" >> "$LOG_FILE"
+                fi
+            fi
+        done
+    fi
     
-    # Ensure we have a minimum duration to avoid division by zero
-    if [ "$total_duration" -le 0 ]; then
-        echo "Warning: Could not determine audio duration, using default" >> "$LOG_FILE"
+    # Log the total duration
+    if [ "$total_duration" -gt 0 ]; then
+        echo "Total audio duration: $(format_time $total_duration)" >> "$LOG_FILE"
+    else
+        echo "Warning: Could not determine audio duration, using default (1 hour)" >> "$LOG_FILE"
         # Set a default duration (1 hour) if we couldn't determine actual duration
         total_duration=3600
     fi
@@ -1225,8 +1260,23 @@ EOF
     if [ -f "$temp_output_file" ]; then
         echo "Successfully created: $temp_output_file" >> "$LOG_FILE"
         
+        # Ensure output directory exists
+        local final_output_dir=$(dirname "$final_output_file")
+        if [ ! -d "$final_output_dir" ]; then
+            mkdir -p "$final_output_dir" || {
+                echo "Error: Failed to create output directory: $final_output_dir" | tee -a "$LOG_FILE"
+                echo "Will try to save in the original directory instead" | tee -a "$LOG_FILE"
+                final_output_file="$book_dir/$(basename "$final_output_file")"
+            }
+        fi
+        
         # Move the file to final location
-        mv "$temp_output_file" "$final_output_file"
+        mv "$temp_output_file" "$final_output_file" || {
+            echo "Error: Failed to move output file to $final_output_file" | tee -a "$LOG_FILE"
+            echo "Output file remains at: $temp_output_file" | tee -a "$LOG_FILE"
+            final_output_file="$temp_output_file"
+        }
+        
         echo "Created: $final_output_file"
         echo "Moved file to: $final_output_file" >> "$LOG_FILE"
         
