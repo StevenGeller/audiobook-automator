@@ -997,17 +997,37 @@ process_directory() {
     
     # Check if directory contains audio files using a more robust approach
     local has_audio_files=false
-    if fd -e mp3 -e m4a -e flac -e wav -e aac . "$dir" --max-depth 1 | grep -q .; then
+    local audio_files_result=$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$dir" --max-depth 1)
+    echo "${indent}DEBUG: Audio files found in $dir_name:" >> "$LOG_FILE"
+    echo "$audio_files_result" >> "$LOG_FILE"
+    
+    if [ -n "$audio_files_result" ] && echo "$audio_files_result" | grep -q .; then
         has_audio_files=true
+        echo "${indent}DEBUG: has_audio_files set to true" >> "$LOG_FILE"
+    else
+        echo "${indent}DEBUG: has_audio_files set to false" >> "$LOG_FILE"
     fi
     
     # Check if directory already has an m4b file
     local has_m4b_files=false
     local m4b_files=""
     if m4b_files=$(find "$dir" -maxdepth 1 -name "*.m4b" 2>/dev/null); then
+        echo "${indent}DEBUG: m4b files found in $dir_name:" >> "$LOG_FILE"
+        echo "$m4b_files" >> "$LOG_FILE"
+        
+        if [ -n "$m4b_files" ] && [ -z "${m4b_files//[[:space:]]/}" ]; then
+            echo "${indent}DEBUG: m4b_files contains only whitespace" >> "$LOG_FILE"
+            m4b_files=""
+        fi
+        
         if [ -n "$m4b_files" ]; then
             has_m4b_files=true
+            echo "${indent}DEBUG: has_m4b_files set to true" >> "$LOG_FILE"
+        else
+            echo "${indent}DEBUG: has_m4b_files set to false" >> "$LOG_FILE"
         fi
+    else
+        echo "${indent}DEBUG: find command for m4b files failed" >> "$LOG_FILE"
     fi
     
     # Process if we have audio files OR m4b files
