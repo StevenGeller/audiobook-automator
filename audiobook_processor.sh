@@ -6,9 +6,10 @@
 # and clear progress indications even for complex file paths.
 #
 # Bash strict mode for more reliable error detection
-set -o errexit    # Exit on error
-set -o pipefail   # Exit if any command in a pipe fails
-set -o nounset    # Error on unset variables
+# We'll enable these after variable initialization
+#set -o errexit    # Exit on error
+#set -o pipefail   # Exit if any command in a pipe fails
+#set -o nounset    # Error on unset variables
 
 # Enable debug mode if requested
 if [[ "${DEBUG:-}" == "1" ]]; then
@@ -47,6 +48,12 @@ if [ ! -d "$AUDIOBOOKS_DIR" ]; then
     echo "Error: The directory $AUDIOBOOKS_DIR does not exist"
     exit 1
 fi
+
+# Now that all variables are initialized, enable strict mode
+set -o errexit    # Exit on error
+set -o pipefail   # Exit if any command in a pipe fails
+# We'll keep nounset disabled as some variables may be referenced before being set
+# set -o nounset    # Error on unset variables
 
 # Create the log file in the audiobooks directory
 LOG_FILE="$AUDIOBOOKS_DIR/processing_log.txt"
@@ -867,14 +874,24 @@ EOF
         # Log the command
         echo "Executing ffmpeg with ${#ffmpeg_args[@]} arguments" >> "$LOG_FILE"
         
-        # Setup progress monitoring in background
+        # Setup enhanced progress monitoring in background
         {
             while [ ! -e "${progress_file}.done" ]; do
                 if [ -f "$stderr_file" ]; then
-                    # Extract time information from stderr for progress
+                    # Extract time and speed information from stderr for detailed progress
                     if grep -q "time=" "$stderr_file"; then
                         time_info=$(grep -o "time=[0-9:.]*" "$stderr_file" | tail -n 1 | cut -d= -f2)
-                        echo "Converting: $time_info elapsed" > "$temp_dir/status.txt"
+                        speed_info=$(grep -o "speed=[0-9.]*x" "$stderr_file" | tail -n 1 | cut -d= -f2)
+                        
+                        # Display progress with percentage if total duration is known
+                        if [ "$total_duration_seconds" -gt 0 ]; then
+                            # Convert HH:MM:SS.MS to seconds
+                            current_seconds=$(echo "$time_info" | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }')
+                            progress_percent=$(( (current_seconds * 100) / total_duration_seconds ))
+                            echo "Converting: $time_info / ~$formatted_duration ($progress_percent% at $speed_info)" > "$temp_dir/status.txt"
+                        else
+                            echo "Converting: $time_info elapsed ($speed_info)" > "$temp_dir/status.txt"
+                        fi
                     fi
                 fi
                 sleep 1
@@ -966,13 +983,23 @@ EOF
             fallback_args+=(-metadata "title=$title" -metadata "artist=$author" -metadata "album=$title")
             fallback_args+=("$temp_output_file")
             
-            # Setup progress monitoring
+            # Setup enhanced progress monitoring for fallback
             {
                 while [ ! -e "${progress_file}.done" ]; do
                     if [ -f "$stderr_file" ]; then
+                        # Extract time and speed information from stderr for detailed progress
                         if grep -q "time=" "$stderr_file"; then
                             time_info=$(grep -o "time=[0-9:.]*" "$stderr_file" | tail -n 1 | cut -d= -f2)
-                            echo "Fallback conversion: $time_info elapsed" > "$temp_dir/status.txt"
+                            speed_info=$(grep -o "speed=[0-9.]*x" "$stderr_file" | tail -n 1 | cut -d= -f2)
+                            
+                            # Get file count for context
+                            current_file=$(grep -o "video:[0-9]*" "$stderr_file" | tail -n 1 | cut -d: -f2)
+                            
+                            if [ -n "$speed_info" ]; then
+                                echo "Fallback converting: $time_info elapsed ($speed_info)" > "$temp_dir/status.txt"
+                            else
+                                echo "Fallback converting: $time_info elapsed" > "$temp_dir/status.txt"
+                            fi
                         fi
                     fi
                     sleep 1
