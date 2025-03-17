@@ -832,8 +832,15 @@ EOF
             # Store the files we'll delete in a variable for safety
             local original_files=$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$book_dir" --max-depth 1)
             
-            # Count files to delete
-            local file_count=$(echo "$original_files" | wc -l)
+            # Debug info about files
+            echo "DEBUG: Found these audio files:" >> "$LOG_FILE"
+            echo "$original_files" >> "$LOG_FILE"
+            
+            # Count files to delete (ignore empty lines)
+            local file_count=0
+            if [ -n "$original_files" ]; then
+                file_count=$(echo "$original_files" | grep -v '^$' | wc -l)
+            fi
             echo "Found $file_count original audio files to clean up" | tee -a "$LOG_FILE"
             
             # Only delete if we have a successful m4b AND at least one original file
@@ -848,14 +855,18 @@ EOF
                 
                 local total_original_size=0
                 for file in $original_files; do
-                    if [ -f "$file" ]; then
+                    if [ -n "$file" ] && [ -f "$file" ]; then
                         local file_size=0
                         if [[ "$OSTYPE" == "darwin"* ]]; then
                             file_size=$(stat -f %z "$file" 2>/dev/null || echo 0)
+                            echo "DEBUG: File $file size: $file_size bytes" >> "$LOG_FILE"
                         else
                             file_size=$(stat -c %s "$file" 2>/dev/null || echo 0)
+                            echo "DEBUG: File $file size: $file_size bytes" >> "$LOG_FILE"
                         fi
                         total_original_size=$((total_original_size + file_size))
+                    elif [ -n "$file" ]; then
+                        echo "DEBUG: Found in list but not a file: $file" >> "$LOG_FILE"
                     fi
                 done
                 
