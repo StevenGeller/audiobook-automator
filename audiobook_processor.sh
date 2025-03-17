@@ -743,7 +743,8 @@ EOF
             fi
             
             # Add to file list with proper escaping
-            echo "file '$(echo "$file" | sed "s/'/'\\\''/g")'" >> "$temp_dir/filelist.txt"
+            # Make sure to properly quote the entire path
+            printf "file '%s'\n" "$file" >> "$temp_dir/filelist.txt"
         done
         
         # Format the total duration
@@ -814,8 +815,9 @@ EOF
         if [ $ffmpeg_result -ne 0 ]; then
             echo "First approach failed with code $ffmpeg_result, trying backup method..." | tee -a "$LOG_FILE"
             
-            # Create a simpler list format
-            awk '{print $2}' "$temp_dir/filelist.txt" | tr -d "'" > "$temp_dir/simplelist.txt"
+            # Create a simpler list format - extract the paths from between single quotes
+            # Using perl for more reliable processing of quotes
+            perl -ne "if (/'([^']+)'/) { print \"\$1\n\"; }" "$temp_dir/filelist.txt" > "$temp_dir/simplelist.txt"
             
             # Try to copy files to temp dir with sequential names to avoid special character issues
             echo "Copying files to temp directory with sequential names..." >> "$LOG_FILE"
@@ -841,9 +843,9 @@ EOF
             
             # Run a simpler ffmpeg command with minimal options
             # Create a simplified file list
-            for f in "$temp_dir"/simple/*.*; do
-                echo "file '$f'" 
-            done | sort > "$temp_dir/simple/concat_list.txt"
+            find "$temp_dir/simple" -type f -name "*.*" | sort | while read -r f; do
+                printf "file '%s'\n" "$f"
+            done > "$temp_dir/simple/concat_list.txt"
             
             # Use the simplified list
             ffmpeg -f concat -safe 0 -i "$temp_dir/simple/concat_list.txt" \
@@ -862,8 +864,8 @@ EOF
                 # If that also fails, try an even simpler approach with direct file inputs
                 echo "Second approach failed, trying final method..." | tee -a "$LOG_FILE"
                 
-                # Get all audio files in the temp dir, sort them, and pass directly to ffmpeg
-                input_files=$(find "$temp_dir/simple" -type f -name "*.*" | sort | tr '\n' ' ')
+                # Get all audio files in the temp dir, sort them into a properly formatted list
+                find "$temp_dir/simple" -type f -name "*.*" | sort > "$temp_dir/simple/final_list.txt"
                 
                 # Run the simplest possible ffmpeg command with direct inputs
                 echo "Trying direct conversion with each file individually..." | tee -a "$LOG_FILE"
@@ -902,11 +904,25 @@ EOF
                 fi
                 
                 # Convert the combined file to m4b
-                ffmpeg -i "$temp_dir/combined.mp3" \
+                # Create a direct list first
+                echo "file '$temp_dir/combined.mp3'" > "$temp_dir/final_input.txt"
+                
+                # Try with the concat demuxer first (most reliable)
+                ffmpeg -f concat -safe 0 -i "$temp_dir/final_input.txt" \
                        -c:a aac -b:a 64k \
                        -metadata title="$title" \
                        -metadata artist="$author" \
                        "$temp_output_file" 2>>"$stderr_file"
+                
+                # If that fails, try direct input as last resort
+                if [ $? -ne 0 ]; then
+                    echo "Final method attempt one failed, trying direct input..." | tee -a "$LOG_FILE"
+                    ffmpeg -i "$temp_dir/combined.mp3" \
+                           -c:a aac -b:a 64k \
+                           -metadata title="$title" \
+                           -metadata artist="$author" \
+                           "$temp_output_file" 2>>"$stderr_file"
+                fi
                        
                 # Update result
                 ffmpeg_result=$?
