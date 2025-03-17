@@ -5,47 +5,40 @@
 # - Sets proper metadata
 # - Detects chapters
 # - Converts to m4b format
+# - Optionally removes original files after successful conversion
 
 # Prerequisites:
 # brew install ffmpeg mp4v2 fd jq mediainfo python3
 # pip3 install requests beautifulsoup4 fuzzywuzzy
 
-# Usage: ./audiobook_processor.sh /path/to/audiobooks/folder
+# Usage: ./audiobook_processor.sh /path/to/audiobooks/folder [--keep-original-files]
+# If the --keep-original-files flag is provided, the original audio files will not be deleted after processing
 
 set -e
 
-AUDIOBOOKS_DIR="$1"
-OUTPUT_DIR="${2:-"$AUDIOBOOKS_DIR/processed"}"
+# Parse arguments
+KEEP_ORIGINAL_FILES=false
+AUDIOBOOKS_DIR=""
+
+for arg in "$@"; do
+    if [[ "$arg" == "--keep-original-files" ]]; then
+        KEEP_ORIGINAL_FILES=true
+    elif [[ -z "$AUDIOBOOKS_DIR" ]]; then
+        AUDIOBOOKS_DIR="$arg"
+    fi
+done
+
 LOG_FILE="$AUDIOBOOKS_DIR/processing_log.txt"
 
 # Check if directory was provided
 if [ -z "$AUDIOBOOKS_DIR" ]; then
     echo "Please provide the path to your audiobooks directory"
-    echo "Usage: ./audiobook_processor.sh /path/to/audiobooks/folder [/path/to/output/folder]"
+    echo "Usage: ./audiobook_processor.sh /path/to/audiobooks/folder [--keep-original-files]"
     exit 1
 fi
 
-# Create output directory if it doesn't exist
-mkdir -p "$OUTPUT_DIR"
-
-# Create standard folder structure in output directory
-mkdir -p "$OUTPUT_DIR/Fiction"
-mkdir -p "$OUTPUT_DIR/Fiction/Fantasy"
-mkdir -p "$OUTPUT_DIR/Fiction/Science Fiction"
-mkdir -p "$OUTPUT_DIR/Fiction/Mystery & Thriller"
-mkdir -p "$OUTPUT_DIR/Fiction/Historical"
-mkdir -p "$OUTPUT_DIR/Fiction/Romance"
-mkdir -p "$OUTPUT_DIR/Fiction/General"
-mkdir -p "$OUTPUT_DIR/Non-Fiction"
-mkdir -p "$OUTPUT_DIR/Non-Fiction/History"
-mkdir -p "$OUTPUT_DIR/Non-Fiction/Science"
-mkdir -p "$OUTPUT_DIR/Non-Fiction/Self-Help"
-mkdir -p "$OUTPUT_DIR/Non-Fiction/Biography"
-mkdir -p "$OUTPUT_DIR/Non-Fiction/Business"
-mkdir -p "$OUTPUT_DIR/Non-Fiction/General"
-mkdir -p "$OUTPUT_DIR/Children"
-mkdir -p "$OUTPUT_DIR/Series"
-mkdir -p "$OUTPUT_DIR/Unsorted"
+# We will process files in place, no need for a separate output directory
+OUTPUT_DIR="$AUDIOBOOKS_DIR"
 
 # Initialize log file
 echo "Audiobook Processing Log - $(date)" > "$LOG_FILE"
@@ -905,67 +898,10 @@ EOF
     # Step 4: Prepare for creating m4b file
     echo "Preparing m4b file creation..." | tee -a "$LOG_FILE"
     
-    # Determine appropriate output directory (but don't move files yet)
-    local target_folder="$OUTPUT_DIR/Unsorted"
+    # For in-place processing, keep the file in the same directory
+    local target_folder="$book_dir"
     
-    # If it's part of a series, put it in the Series folder
-    if [ -n "$series" ]; then
-        # Create series-specific subfolder
-        series_folder=$(sanitize_filename "$series")
-        target_folder="$OUTPUT_DIR/Series/$series_folder"
-    # Otherwise organize by genre
-    elif [ -n "$genre" ]; then
-        case "$genre" in
-            *Fantasy*|*Magic*|*Dragons*|*Wizards*)
-                target_folder="$OUTPUT_DIR/Fiction/Fantasy"
-                ;;
-            *Science*Fiction*|*Sci-Fi*|*SciFi*|*Dystopian*|*Space*|*Aliens*)
-                target_folder="$OUTPUT_DIR/Fiction/Science Fiction"
-                ;;
-            *Mystery*|*Thriller*|*Suspense*|*Detective*|*Crime*)
-                target_folder="$OUTPUT_DIR/Fiction/Mystery & Thriller"
-                ;;
-            *Historical*|*History*)
-                if [[ "$genre" == *Fiction* ]]; then
-                    target_folder="$OUTPUT_DIR/Fiction/Historical"
-                else
-                    target_folder="$OUTPUT_DIR/Non-Fiction/History"
-                fi
-                ;;
-            *Romance*|*Love*)
-                target_folder="$OUTPUT_DIR/Fiction/Romance"
-                ;;
-            *Biography*|*Memoir*|*Autobiography*)
-                target_folder="$OUTPUT_DIR/Non-Fiction/Biography"
-                ;;
-            *Science*|*Physics*|*Biology*|*Chemistry*)
-                target_folder="$OUTPUT_DIR/Non-Fiction/Science"
-                ;;
-            *Self*Help*|*Personal*Development*|*Motivation*)
-                target_folder="$OUTPUT_DIR/Non-Fiction/Self-Help"
-                ;;
-            *Business*|*Economics*|*Finance*|*Management*)
-                target_folder="$OUTPUT_DIR/Non-Fiction/Business"
-                ;;
-            *Children*|*Kids*|*Young*Reader*)
-                target_folder="$OUTPUT_DIR/Children"
-                ;;
-            *Fiction*)
-                target_folder="$OUTPUT_DIR/Fiction/General"
-                ;;
-            *Non*Fiction*)
-                target_folder="$OUTPUT_DIR/Non-Fiction/General"
-                ;;
-        esac
-    fi
-    
-    # Prepare author subfolder
-    if [ -n "$author" ]; then
-        author_folder=$(sanitize_filename "$author")
-        target_folder="$target_folder/$author_folder"
-    fi
-    
-    # If it's part of a series, add series and part to filename
+    # Create a standardized filename based on metadata
     local output_filename="${author} - ${title}"
     if [ -n "$series" ] && [ -n "$series_part" ]; then
         output_filename="${author} - ${series} ${series_part} - ${title}"
@@ -973,7 +909,14 @@ EOF
         output_filename="${author} - ${series} - ${title}"
     fi
     
-    local output_file="$temp_dir/${output_filename}.m4b"
+    # Sanitize the output filename
+    output_filename=$(sanitize_filename "$output_filename")
+    
+    # Temp output file during processing
+    local temp_output_file="$temp_dir/${output_filename}.m4b"
+    
+    # Final output file in the same directory as the input
+    local final_output_file="$book_dir/${output_filename}.m4b"
     
     # Step 5: Create m4b file with metadata, chapters, and cover art
     echo "Creating m4b file..." | tee -a "$LOG_FILE"
@@ -1039,7 +982,7 @@ EOF
         $([[ -n "$series" && -n "$series_part" ]] && echo "-metadata episode_id=\"$series_part\"") \
         $([[ -n "$year" ]] && echo "-metadata date=\"$year\"") \
         $([[ -n "$description" ]] && echo "-metadata description=\"${description:0:255}\"") \
-        "$output_file" 2>"$stderr_file"
+        "$temp_output_file" 2>"$stderr_file"
         
     local ffmpeg_result=$?
     set -e  # Re-enable exit on error
@@ -1070,41 +1013,86 @@ EOF
     fi
     
     # Check if output file was created
-    if [ -f "$output_file" ]; then
-        echo "Successfully created: $output_file" | tee -a "$LOG_FILE"
+    if [ -f "$temp_output_file" ]; then
+        echo "Successfully created: $temp_output_file" | tee -a "$LOG_FILE"
         
-        # Create target directory if it doesn't exist
-        mkdir -p "$target_folder"
-        
-        # Move the file to target directory
-        local final_file="$target_folder/${output_filename}.m4b"
-        mv "$output_file" "$final_file"
-        
-        echo "Moved file to: $final_file" | tee -a "$LOG_FILE"
+        # Move the file to final location
+        mv "$temp_output_file" "$final_output_file"
+        echo "Moved file to: $final_output_file" | tee -a "$LOG_FILE"
         
         # Get file info
-        local file_info=$(mediainfo "$final_file")
+        local file_info=$(mediainfo "$final_output_file")
         echo "File info:" | tee -a "$LOG_FILE"
         echo "$file_info" | grep -E "Complete name|Format|Duration|Title|Performer|Album" | tee -a "$LOG_FILE"
+        
+        # Clean up original files if requested
+        if [ "$KEEP_ORIGINAL_FILES" = false ]; then
+            echo "Cleaning up original audio files..." | tee -a "$LOG_FILE"
+            # Store the files we'll delete in a variable for safety
+            local original_files=$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$book_dir" --max-depth 1)
+            
+            # Count files to delete
+            local file_count=$(echo "$original_files" | wc -l)
+            echo "Found $file_count original audio files to clean up" | tee -a "$LOG_FILE"
+            
+            # Only delete if we have a successful m4b AND at least one original file
+            if [ -f "$final_output_file" ] && [ "$file_count" -gt 0 ]; then
+                # Verify the m4b file has a reasonable size compared to original files
+                local m4b_size=$(stat -f %z "$final_output_file")
+                local total_original_size=0
+                for file in $original_files; do
+                    if [ -f "$file" ]; then
+                        file_size=$(stat -f %z "$file")
+                        total_original_size=$((total_original_size + file_size))
+                    fi
+                done
+                
+                # Ensure the m4b is at least 50% the size of the original files
+                # This is a failsafe to prevent deleting originals if the m4b is corrupted
+                if [ $m4b_size -gt $((total_original_size / 2)) ]; then
+                    echo "M4B file size ($m4b_size bytes) is reasonable compared to originals ($total_original_size bytes)" | tee -a "$LOG_FILE"
+                    echo "Removing original audio files..." | tee -a "$LOG_FILE"
+                    
+                    # Delete each file individually for better control
+                    for file in $original_files; do
+                        if [ -f "$file" ]; then
+                            rm "$file"
+                            echo "Deleted: $file" | tee -a "$LOG_FILE"
+                        fi
+                    done
+                    
+                    echo "Original files cleaned up successfully" | tee -a "$LOG_FILE"
+                else
+                    echo "WARNING: M4B file size ($m4b_size bytes) is too small compared to originals ($total_original_size bytes)" | tee -a "$LOG_FILE"
+                    echo "Keeping original files as a precaution" | tee -a "$LOG_FILE"
+                fi
+            else
+                echo "No original files to clean up, or m4b file not found" | tee -a "$LOG_FILE"
+            fi
+        else
+            echo "Keeping original files (--keep-original-files flag is set)" | tee -a "$LOG_FILE"
+        fi
     else
-        echo "Failed to create $output_file" | tee -a "$LOG_FILE"
+        echo "Failed to create $temp_output_file" | tee -a "$LOG_FILE"
     fi
     
-    # Clean up
+    # Clean up temporary directory
     rm -rf "$temp_dir"
     echo "Processing completed for: $book_name" | tee -a "$LOG_FILE"
     echo "-------------------------------------------" | tee -a "$LOG_FILE"
 }
 
 # Main script execution
-echo "Starting batch processing of audiobooks in $AUDIOBOOKS_DIR" | tee -a "$LOG_FILE"
-echo "Output directory structure created in: $OUTPUT_DIR" | tee -a "$LOG_FILE"
-echo "Directory structure:" | tee -a "$LOG_FILE"
-find "$OUTPUT_DIR" -type d -mindepth 1 -maxdepth 2 | sort | tee -a "$LOG_FILE"
+echo "Starting in-place processing of audiobooks in $AUDIOBOOKS_DIR" | tee -a "$LOG_FILE"
+if [ "$KEEP_ORIGINAL_FILES" = true ]; then
+    echo "Original files will be kept after processing (--keep-original-files flag is set)" | tee -a "$LOG_FILE"
+else
+    echo "Original files will be removed after successful m4b conversion" | tee -a "$LOG_FILE"
+fi
 echo "-------------------------------------------" | tee -a "$LOG_FILE"
 
 # Find all potential audiobook directories (containing audio files)
-find "$AUDIOBOOKS_DIR" -type d -not -path "$OUTPUT_DIR*" -not -path "*/temp_processing*" | while read -r dir; do
+find "$AUDIOBOOKS_DIR" -type d -not -path "*/temp_processing*" | while read -r dir; do
     # Skip the main directory itself
     if [ "$dir" = "$AUDIOBOOKS_DIR" ]; then
         continue
@@ -1135,21 +1123,6 @@ echo "Batch processing completed. Check $LOG_FILE for details." | tee -a "$LOG_F
 echo "-------------------------------------------" | tee -a "$LOG_FILE"
 echo "Processing Summary:" | tee -a "$LOG_FILE"
 echo "Total audiobooks processed: $(grep -c "Processing completed for:" "$LOG_FILE")" | tee -a "$LOG_FILE"
-echo "Books organized by category:" | tee -a "$LOG_FILE"
-echo "- Fiction/Fantasy: $(find "$OUTPUT_DIR/Fiction/Fantasy" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Fiction/Science Fiction: $(find "$OUTPUT_DIR/Fiction/Science Fiction" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Fiction/Mystery & Thriller: $(find "$OUTPUT_DIR/Fiction/Mystery & Thriller" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Fiction/Historical: $(find "$OUTPUT_DIR/Fiction/Historical" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Fiction/Romance: $(find "$OUTPUT_DIR/Fiction/Romance" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Fiction/General: $(find "$OUTPUT_DIR/Fiction/General" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Non-Fiction/History: $(find "$OUTPUT_DIR/Non-Fiction/History" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Non-Fiction/Science: $(find "$OUTPUT_DIR/Non-Fiction/Science" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Non-Fiction/Self-Help: $(find "$OUTPUT_DIR/Non-Fiction/Self-Help" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Non-Fiction/Biography: $(find "$OUTPUT_DIR/Non-Fiction/Biography" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Non-Fiction/Business: $(find "$OUTPUT_DIR/Non-Fiction/Business" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Non-Fiction/General: $(find "$OUTPUT_DIR/Non-Fiction/General" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Children: $(find "$OUTPUT_DIR/Children" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Series: $(find "$OUTPUT_DIR/Series" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
-echo "- Unsorted: $(find "$OUTPUT_DIR/Unsorted" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
+echo "Total m4b files: $(find "$AUDIOBOOKS_DIR" -type f -name "*.m4b" | wc -l)" | tee -a "$LOG_FILE"
 echo "-------------------------------------------" | tee -a "$LOG_FILE"
-echo "Finished. Audio books organized in: $OUTPUT_DIR" | tee -a "$LOG_FILE"
+echo "Finished. Audio books processed in: $AUDIOBOOKS_DIR" | tee -a "$LOG_FILE"
