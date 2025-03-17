@@ -829,8 +829,8 @@ EOF
         # Clean up original files if requested
         if [ "$KEEP_ORIGINAL_FILES" = false ]; then
             echo "Cleaning up original audio files..." >> "$LOG_FILE"
-            # Store the files we'll delete in a variable for safety
-            local original_files=$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$book_dir" --max-depth 1)
+            # Store the files we'll delete in a variable for safety (using standard find for better compatibility)
+            local original_files=$(find "$book_dir" -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.flac" -o -name "*.wav" -o -name "*.aac" \) 2>/dev/null)
             
             # Debug info about files
             echo "DEBUG: Found these audio files:" >> "$LOG_FILE"
@@ -995,9 +995,9 @@ process_directory() {
     # Debug info
     echo "${indent}Checking directory: $dir_name" >> "$LOG_FILE"
     
-    # Check if directory contains audio files using a more robust approach
+    # Check if directory contains audio files using standard find (more compatible than fd)
     local has_audio_files=false
-    local audio_files_result=$(fd -e mp3 -e m4a -e flac -e wav -e aac . "$dir" --max-depth 1)
+    local audio_files_result=$(find "$dir" -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.flac" -o -name "*.wav" -o -name "*.aac" \) 2>/dev/null)
     echo "${indent}DEBUG: Audio files found in $dir_name:" >> "$LOG_FILE"
     echo "$audio_files_result" >> "$LOG_FILE"
     
