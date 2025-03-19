@@ -140,13 +140,16 @@ process_audiobook() {
     local audio_files=()
     local audio_exts=("mp3" "m4a" "m4b" "aac" "ogg" "opus" "flac" "wav" "wma")
     
+    echo "Searching for audio files in $book_dir with recursive=$RECURSIVE_SEARCH" | tee -a "$LOG_FILE"
+    
     for ext in "${audio_exts[@]}"; do
+        echo "Looking for *.$ext files..." | tee -a "$LOG_FILE"
         while IFS= read -r line; do
             if [ -n "$line" ] && [ -f "$line" ]; then
                 audio_files+=("$line")
-                echo "Found audio file: $(basename "$line")" | tee -a "$LOG_FILE"
+                echo "Found audio file: $(basename "$line") ($(du -h "$line" | cut -f1))" | tee -a "$LOG_FILE"
             fi
-        done < <(find "$book_dir" $([[ "$RECURSIVE_SEARCH" -eq 1 ]] || echo "-maxdepth 1") -type f -name "*.$ext" 2>/dev/null)
+        done < <(find "$book_dir" $([[ "$RECURSIVE_SEARCH" -eq 1 ]] || echo "-maxdepth 1") -type f -iname "*.$ext" 2>/dev/null)
     done
     
     local file_count="${#audio_files[@]}"

@@ -30,16 +30,29 @@ run_ffmpeg_with_timeout() {
     
     # Start a watchdog process that will terminate ffmpeg if it runs too long
     {
+        echo "Watchdog started for PID $ffmpeg_pid with timeout of ${ffmpeg_timeout}s" >> "$LOG_FILE"
         local i
         for ((i=1; i<=$ffmpeg_timeout; i++)); do
             # Check if ffmpeg is still running
             if ! ps -p $ffmpeg_pid > /dev/null 2>&1; then
+                echo "Watchdog: FFmpeg process $ffmpeg_pid has finished after ${i}s" >> "$LOG_FILE"
                 break  # Process already finished
             fi
             
-            # Print progress every 60 seconds
-            if ((i % 60 == 0)); then
-                echo "ffmpeg running for $i seconds..." >> "$LOG_FILE"
+            # Print progress more frequently (every 10 seconds)
+            if ((i % 10 == 0)); then
+                echo "FFmpeg running for $i seconds (PID: $ffmpeg_pid)..." >> "$LOG_FILE"
+                
+                # Also check if it's stuck by looking at CPU usage
+                if command -v top &>/dev/null; then
+                    local cpu_usage=$(top -l 1 -pid $ffmpeg_pid -stats cpu | tail -n 1 | awk '{print $1}')
+                    echo "FFmpeg CPU usage: ${cpu_usage:-Unknown}%" >> "$LOG_FILE"
+                    
+                    # If CPU usage is repeatedly too low, might be stuck
+                    if [[ -n "$cpu_usage" && $(echo "$cpu_usage < 0.5" | bc) -eq 1 ]]; then
+                        echo "WARNING: FFmpeg seems to have low CPU activity, might be stuck" >> "$LOG_FILE"
+                    fi
+                fi
             fi
             
             sleep 1
@@ -47,20 +60,38 @@ run_ffmpeg_with_timeout() {
         
         # If ffmpeg is still running after timeout, kill it
         if ps -p $ffmpeg_pid > /dev/null 2>&1; then
-            echo "Killing ffmpeg process after $ffmpeg_timeout second timeout..." >> "$LOG_FILE"
+            echo "TIMEOUT: Killing ffmpeg process $ffmpeg_pid after $ffmpeg_timeout second timeout..." >> "$LOG_FILE"
             kill -15 $ffmpeg_pid > /dev/null 2>&1  # Try SIGTERM first
             sleep 2
+            
             # If still running, use SIGKILL
             if ps -p $ffmpeg_pid > /dev/null 2>&1; then
+                echo "FFmpeg process $ffmpeg_pid did not terminate with SIGTERM, using SIGKILL..." >> "$LOG_FILE"
                 kill -9 $ffmpeg_pid > /dev/null 2>&1
+                
+                # Make sure it's gone
+                sleep 1
+                if ps -p $ffmpeg_pid > /dev/null 2>&1; then
+                    echo "CRITICAL ERROR: Failed to kill FFmpeg process $ffmpeg_pid!" >> "$LOG_FILE"
+                else
+                    echo "FFmpeg process $ffmpeg_pid successfully terminated with SIGKILL" >> "$LOG_FILE"
+                fi
+            else
+                echo "FFmpeg process $ffmpeg_pid successfully terminated with SIGTERM" >> "$LOG_FILE"
             fi
+            
             # Signal that we're done to the progress monitor
             touch "${progress_file}.done" 2>/dev/null || true
+            echo "Signaled completion to progress monitor" >> "$LOG_FILE"
+            
             # Return failure
-            return 1
+            exit 1  # Exit the subshell with failure
         fi
+        
+        echo "Watchdog exiting normally - ffmpeg completed successfully" >> "$LOG_FILE"
     } &
     local watchdog_pid=$!
+    echo "Started watchdog process with PID $watchdog_pid" >> "$LOG_FILE"
     
     # Wait for ffmpeg to complete
     wait $ffmpeg_pid
@@ -124,16 +155,20 @@ convert_to_m4b() {
         -nostdin  # Don't expect stdin input
     )
     
-    # Add input files
+    # Add input files with better logging
     for file in "${input_files[@]}"; do
+        # Log each file being added
+        echo "Adding input file: $(basename "$file")" >> "$LOG_FILE"
         ffmpeg_args+=(-i "$file")
     done
     
     # Add cover art if provided
     if [ -n "$cover_image" ] && [ -f "$cover_image" ]; then
+        echo "Adding cover image: $(basename "$cover_image")" >> "$LOG_FILE"
         ffmpeg_args+=(-i "$cover_image")
         local has_cover=1
     else
+        echo "No cover image found or specified" >> "$LOG_FILE"
         local has_cover=0
     fi
     
@@ -160,15 +195,24 @@ convert_to_m4b() {
         "$temp_output_file"
     )
     
+    # Debug: Print ffmpeg command for diagnostics
+    echo "FFmpeg command to be executed:" >> "$LOG_FILE"
+    echo "ffmpeg ${ffmpeg_args[*]}" >> "$LOG_FILE"
+    
     # Run ffmpeg with timeout
+    echo "Starting FFmpeg conversion with 7200 second timeout..." >> "$LOG_FILE"
     run_ffmpeg_with_timeout "$LOG_FILE" "$progress_file" "$stderr_file" 7200 "${ffmpeg_args[@]}"
     local result=$?
+    echo "FFmpeg finished with exit code: $result" >> "$LOG_FILE"
     
     # Signal progress indicator to stop
+    echo "Signaling progress indicator to stop..." >> "$LOG_FILE"
     for i in {1..5}; do
         if touch "${progress_file}.done" 2>/dev/null; then
+            echo "Progress indicator signaled successfully" >> "$LOG_FILE"
             break
         fi
+        echo "Failed to signal progress indicator, retrying... ($i/5)" >> "$LOG_FILE"
         sleep 1
     done
     

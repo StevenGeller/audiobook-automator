@@ -31,8 +31,20 @@ show_progress_indicator() {
     echo "Book: $message_prefix"
     echo "Starting file processing..."
     
-    # Loop until signaled to stop
+    # Set a maximum wait time (20 minutes) in case the signal file is never created
+    local max_wait_seconds=$((20*60))
+    local start_wait_time=$(date +%s)
+    
+    # Loop until signaled to stop or timeout reached
     while [ ! -f "${progress_file}.done" ]; do
+        # Check for maximum wait time exceeded
+        local current_time=$(date +%s)
+        local wait_time=$((current_time - start_wait_time))
+        if [ $wait_time -gt $max_wait_seconds ]; then
+            echo "WARNING: Progress indicator timed out after waiting $wait_time seconds"
+            break
+        fi
+        
         # Get current progress count
         if [ -f "$progress_file" ]; then
             local count=$(cat "$progress_file" 2>/dev/null || echo "0")
