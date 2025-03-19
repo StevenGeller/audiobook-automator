@@ -17,13 +17,47 @@ find_audio_files() {
         depth_arg="-maxdepth 1"
     fi
     
-    # Search for common audio file extensions
-    if [ -d "$dir" ]; then
-        if [ "$recursive" -eq 0 ]; then
-            find "$dir" -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.m4b" -o -name "*.aac" -o -name "*.ogg" -o -name "*.opus" -o -name "*.flac" -o -name "*.wav" -o -name "*.wma" \) 2>/dev/null | sort
-        else
-            find "$dir" -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.m4b" -o -name "*.aac" -o -name "*.ogg" -o -name "*.opus" -o -name "*.flac" -o -name "*.wav" -o -name "*.wma" \) 2>/dev/null | sort
-        fi
+    # Debug output
+    echo "DEBUG: Searching for audio files in: $dir" | tee -a "$LOG_FILE"
+    
+    # Check if directory exists
+    if [ ! -d "$dir" ]; then
+        echo "ERROR: Directory does not exist or is not a directory: $dir" | tee -a "$LOG_FILE"
+        return 1
+    fi
+    
+    # Search for common audio file extensions with debug info
+    # First count files to see if we should find anything
+    local count=0
+    if [ "$recursive" -eq 0 ]; then
+        count=$(find "$dir" -maxdepth 1 -type f -name "*.mp3" -o -name "*.m4a" -o -name "*.m4b" -o -name "*.aac" -o -name "*.ogg" -o -name "*.opus" -o -name "*.flac" -o -name "*.wav" -o -name "*.wma" 2>/dev/null | wc -l)
+    else
+        count=$(find "$dir" -type f -name "*.mp3" -o -name "*.m4a" -o -name "*.m4b" -o -name "*.aac" -o -name "*.ogg" -o -name "*.opus" -o -name "*.flac" -o -name "*.wav" -o -name "*.wma" 2>/dev/null | wc -l)
+    fi
+    
+    echo "DEBUG: Found $count potential audio files in $dir" | tee -a "$LOG_FILE"
+    
+    # Now get the actual files, with special handling for directories with spaces
+    if [ "$recursive" -eq 0 ]; then
+        find "$dir" -maxdepth 1 -type f -name "*.mp3" 2>/dev/null
+        find "$dir" -maxdepth 1 -type f -name "*.m4a" 2>/dev/null
+        find "$dir" -maxdepth 1 -type f -name "*.m4b" 2>/dev/null
+        find "$dir" -maxdepth 1 -type f -name "*.aac" 2>/dev/null
+        find "$dir" -maxdepth 1 -type f -name "*.ogg" 2>/dev/null
+        find "$dir" -maxdepth 1 -type f -name "*.opus" 2>/dev/null
+        find "$dir" -maxdepth 1 -type f -name "*.flac" 2>/dev/null
+        find "$dir" -maxdepth 1 -type f -name "*.wav" 2>/dev/null
+        find "$dir" -maxdepth 1 -type f -name "*.wma" 2>/dev/null
+    else
+        find "$dir" -type f -name "*.mp3" 2>/dev/null
+        find "$dir" -type f -name "*.m4a" 2>/dev/null
+        find "$dir" -type f -name "*.m4b" 2>/dev/null
+        find "$dir" -type f -name "*.aac" 2>/dev/null
+        find "$dir" -type f -name "*.ogg" 2>/dev/null
+        find "$dir" -type f -name "*.opus" 2>/dev/null
+        find "$dir" -type f -name "*.flac" 2>/dev/null
+        find "$dir" -type f -name "*.wav" 2>/dev/null
+        find "$dir" -type f -name "*.wma" 2>/dev/null
     fi
 }
 
@@ -42,22 +76,21 @@ find_audiobook_directories() {
     echo "Starting directory scan in: $root_dir" >> "$LOG_FILE"
     
     # First check directories one level deep
-    for dir in "$root_dir"/*; do
-        if [ ! -d "$dir" ]; then
-            continue  # Skip if not a directory
-        fi
-        
+    find "$root_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r dir; do
         # Get basename for cleaner logging
         local dirname=$(basename "$dir")
         
-        # Count audio files in this directory
+        # Count audio files in this directory using separate find commands to handle spaces properly
         local file_count=0
-        local files=""
-        files=$(find "$dir" -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.m4b" -o -name "*.aac" -o -name "*.ogg" -o -name "*.opus" -o -name "*.flac" -o -name "*.wav" -o -name "*.wma" \) 2>/dev/null)
+        local audio_extensions=("mp3" "m4a" "m4b" "aac" "ogg" "opus" "flac" "wav" "wma")
         
-        if [ -n "$files" ]; then
-            file_count=$(echo "$files" | wc -l)
-        fi
+        for ext in "${audio_extensions[@]}"; do
+            local count=$(find "$dir" -maxdepth 1 -type f -name "*.$ext" 2>/dev/null | wc -l)
+            count=$(echo "$count" | tr -d ' ')  # Trim whitespace
+            file_count=$((file_count + count))
+        done
+        
+        echo "DEBUG: Directory '$dirname' has $file_count audio files" | tee -a "$LOG_FILE"
         
         if [ "$file_count" -gt 0 ]; then
             # This directory has audio files
@@ -72,29 +105,31 @@ find_audiobook_directories() {
             echo "Scanning folder: $dirname ($(printf "%8d" "$subdirs") subdirectories)" | tee -a "$LOG_FILE"
             
             # Look for existing processed files
-            local processed_files=$(find "$dir" -type f -name "*.m4b" 2>/dev/null)
-            if [ -n "$processed_files" ]; then
-                echo "$processed_files" | tee -a "$LOG_FILE"
+            local processed_count=0
+            for ext in "${audio_extensions[@]}"; do
+                processed_count=$((processed_count + $(find "$dir" -type f -name "*.$ext" 2>/dev/null | wc -l | tr -d ' ')))
+            done
+            
+            if [ "$processed_count" -gt 0 ]; then
+                echo "Directory has $processed_count processed audio files" | tee -a "$LOG_FILE"
             fi
             
-            # Check each subdirectory
+            # Check each subdirectory using find to handle spaces properly
             local sub_found=0
-            for subdir in "$dir"/*; do
-                if [ ! -d "$subdir" ]; then
-                    continue  # Skip if not a directory
-                fi
-                
+            find "$dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r subdir; do
                 # Check for audio files in this subdirectory
-                local subfiles=""
                 local subfile_count=0
-                subfiles=$(find "$subdir" -maxdepth 1 -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.m4b" -o -name "*.aac" -o -name "*.ogg" -o -name "*.opus" -o -name "*.flac" -o -name "*.wav" -o -name "*.wma" \) 2>/dev/null)
                 
-                if [ -n "$subfiles" ]; then
-                    subfile_count=$(echo "$subfiles" | wc -l)
-                    subfile_count=$(echo "$subfile_count" | tr -d ' ')  # Trim whitespace
-                fi
+                for ext in "${audio_extensions[@]}"; do
+                    local count=$(find "$subdir" -maxdepth 1 -type f -name "*.$ext" 2>/dev/null | wc -l)
+                    count=$(echo "$count" | tr -d ' ')  # Trim whitespace
+                    subfile_count=$((subfile_count + count))
+                done
+                
+                echo "DEBUG: Subdirectory '$(basename "$subdir")' has $subfile_count audio files" | tee -a "$LOG_FILE"
                 
                 if [ "$subfile_count" -gt 0 ]; then
+                    # Explicitly add the full path to found_dirs
                     found_dirs+=("$subdir")
                     echo "Found audiobook with audio files: $(basename "$subdir")" | tee -a "$LOG_FILE"
                     sub_found=1
@@ -103,10 +138,15 @@ find_audiobook_directories() {
             
             # If no subdirectories with audio files, check if the directory itself should be included
             if [ "$sub_found" -eq 0 ]; then
-                # Maybe there are audio files deeper in the structure
-                local deep_files=$(find "$dir" -type f \( -name "*.mp3" -o -name "*.m4a" -o -name "*.m4b" -o -name "*.aac" -o -name "*.ogg" -o -name "*.opus" -o -name "*.flac" -o -name "*.wav" -o -name "*.wma" \) 2>/dev/null | head -n 1)
+                # Check for deeper audio files
+                local deep_count=0
+                for ext in "${audio_extensions[@]}"; do
+                    deep_count=$((deep_count + $(find "$dir" -type f -name "*.$ext" 2>/dev/null | wc -l | tr -d ' ')))
+                done
                 
-                if [ -n "$deep_files" ]; then
+                echo "DEBUG: Deep scan of '$dirname' found $deep_count audio files" | tee -a "$LOG_FILE"
+                
+                if [ "$deep_count" -gt 0 ]; then
                     found_dirs+=("$dir")
                     echo "Found audiobook with nested audio files: $dirname" | tee -a "$LOG_FILE"
                 fi
@@ -114,9 +154,13 @@ find_audiobook_directories() {
         fi
     done
     
-    # Return the array as a newline-separated list
+    # Make sure we found something
+    echo "DEBUG: Found ${#found_dirs[@]} directories with audio files" | tee -a "$LOG_FILE"
+    
+    # Return the array as a newline-separated list with proper escaping
     for dir in "${found_dirs[@]}"; do
-        echo "$dir"
+        # Make sure the path is properly quoted
+        printf "%s\n" "$dir"
     done
 }
 

@@ -115,6 +115,12 @@ process_audiobook() {
     echo "=====================================" | tee -a "$LOG_FILE"
     echo "Processing: $(basename "$book_dir")" | tee -a "$LOG_FILE"
     
+    # Check if directory exists and is accessible
+    if [ ! -d "$book_dir" ]; then
+        echo "ERROR: Directory does not exist or is not accessible: $book_dir" | tee -a "$LOG_FILE"
+        return 1
+    fi
+    
     # Skip if already processed
     for dir in "${PROCESSED_DIRS[@]}"; do
         if [ "$dir" = "$book_dir" ]; then
@@ -126,13 +132,23 @@ process_audiobook() {
     # Add to processed directories
     PROCESSED_DIRS+=("$book_dir")
     
-    # Find audio files
+    # List directory contents for debugging
+    echo "Directory contents:" | tee -a "$LOG_FILE"
+    ls -la "$book_dir" | head -n 10 | tee -a "$LOG_FILE"
+    
+    # Find audio files using direct method for better handling of special characters
     local audio_files=()
-    while IFS= read -r line; do
-        if [ -n "$line" ]; then
-            audio_files+=("$line")
-        fi
-    done < <(find_audio_files "$book_dir" "$RECURSIVE_SEARCH")
+    local audio_exts=("mp3" "m4a" "m4b" "aac" "ogg" "opus" "flac" "wav" "wma")
+    
+    for ext in "${audio_exts[@]}"; do
+        while IFS= read -r line; do
+            if [ -n "$line" ] && [ -f "$line" ]; then
+                audio_files+=("$line")
+                echo "Found audio file: $(basename "$line")" | tee -a "$LOG_FILE"
+            fi
+        done < <(find "$book_dir" $([[ "$RECURSIVE_SEARCH" -eq 1 ]] || echo "-maxdepth 1") -type f -name "*.$ext" 2>/dev/null)
+    done
+    
     local file_count="${#audio_files[@]}"
     
     if [ "$file_count" -eq 0 ]; then
@@ -284,12 +300,30 @@ main() {
     echo "Output directory: $DEFAULT_OUTPUT_DIR" | tee -a "$LOG_FILE"
     echo "=============================================================" | tee -a "$LOG_FILE"
     
+    # Create output directory if it doesn't exist
+    mkdir -p "$DEFAULT_OUTPUT_DIR"
+    
     # Find audiobook directories
     echo "Scanning for audiobooks... (this may take a moment)" | tee -a "$LOG_FILE"
+    
+    # Save the result of the directory scan to a temporary file
+    local temp_dir_file=$(mktemp)
+    find_audiobook_directories "$INPUT_DIR" "$LOG_FILE" > "$temp_dir_file"
+    
+    # Read from the file to avoid issues with subshell variables
     local book_dirs=()
     while IFS= read -r line; do
-        book_dirs+=("$line")
-    done < <(find_audiobook_directories "$INPUT_DIR" "$LOG_FILE")
+        if [ -n "$line" ] && [ -d "$line" ]; then
+            book_dirs+=("$line")
+            echo "DEBUG: Added directory to processing list: $line" | tee -a "$LOG_FILE"
+        else
+            echo "WARNING: Invalid directory entry: $line" | tee -a "$LOG_FILE"
+        fi
+    done < "$temp_dir_file"
+    
+    # Clean up temp file
+    rm -f "$temp_dir_file"
+    
     local dir_count="${#book_dirs[@]}"
     
     echo "=============================================================" | tee -a "$LOG_FILE"
@@ -300,14 +334,25 @@ main() {
     local processed_count=0
     local success_count=0
     
+    # If no directories found, show a message
+    if [ "$dir_count" -eq 0 ]; then
+        echo "ERROR: No directories with audio files found. Check the path and try again." | tee -a "$LOG_FILE"
+        exit 1
+    fi
+    
+    # Process each audiobook
     for ((i=0; i<dir_count; i++)); do
         local book_dir="${book_dirs[$i]}"
         echo "" | tee -a "$LOG_FILE"
         echo "BOOK [$((i+1))/$dir_count]: $(basename "$book_dir")" | tee -a "$LOG_FILE"
+        echo "Full path: $book_dir" | tee -a "$LOG_FILE"
         echo "------------------------------------------------------------" | tee -a "$LOG_FILE"
-        process_audiobook "$book_dir" "$i"
         
-        if [ $? -eq 0 ]; then
+        # Process the audiobook
+        process_audiobook "$book_dir" "$i"
+        local result=$?
+        
+        if [ $result -eq 0 ]; then
             success_count=$((success_count + 1))
         fi
         processed_count=$((processed_count + 1))
